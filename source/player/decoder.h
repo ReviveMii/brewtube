@@ -58,6 +58,7 @@ typedef struct {
 } DecFrame;
 
 Decoder *decOpen(const char *path, MediaInfo *info, char *err, int errSize);
+void decAbort(Decoder *d);
 void decClose(Decoder *d);
 DecResult decNext(Decoder *d, DecFrame *out);
 int decSeek(Decoder *d, double seconds);

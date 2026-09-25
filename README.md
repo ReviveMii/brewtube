@@ -7,7 +7,7 @@
 A Homebrew YouTube App for the Wii based on [WiiMC](https://github.com/dborth/wiimc/) and [libwiigui](https://github.com/dborth/libgui) and inspired by [FourthTube](https://github.com/erievs/FourthTube)
 
 ## Installing
-Download the latest release or build the project
+Download the [latest release](https://github.com/ReviveMii/brewtube/releases) or build the project
 
 ### Building the project
 Install [Devkit-Pro](https://devkitpro.org/), [libogc2](https://github.com/extremscorner/libogc2) and [wii-curl](https://github.com/AndrewPiroli/wii-curl)
@@ -20,9 +20,10 @@ Run ```make```
 
 ## TODO
 - Better Design
-- 480p Video Streams with VISIONOS client with ANDROID fallback (current client, 360p is the only available stream in ANDROID) (requires implementing adaptive streams): [yt-dlp example](https://github.com/yt-dlp/yt-dlp/blob/c7fb478d21e9e59524befbe23f7801bb267fb880/yt_dlp/extractor/youtube/_base.py#L296-L310)
+- ~~480p Video Streams with VISIONOS client with ANDROID fallback (current client, 360p is the only available stream in ANDROID) (requires implementing adaptive streams): [yt-dlp example](https://github.com/yt-dlp/yt-dlp/blob/c7fb478d21e9e59524befbe23f7801bb267fb880/yt_dlp/extractor/youtube/_base.py#L296-L310)~~
+- Make VISIONOS client faster to replace ANDROID
 - Channels (channel name clickable in player and channels in search results)
-- Display video metadata and channel profile picture in player
+- ~~Display video metadata and channel profile picture in player~~
 - Playlists (in search results)
 - Sign-In (with What to Watch, Subscriptions, Watch Later, Watch History, Favorites, Uploads and Playlists)
 - Comments
@@ -36,8 +37,8 @@ Run ```make```
 - Search Suggestions
 - Local Search History
 - Local Watch History
-- Fix buttons
-- Display upload date in search results
+- ~~Fix buttons~~
+- ~~Display upload date in search results~~
 - Local Subscriptions
 
 ## Credits

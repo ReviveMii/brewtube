@@ -41,8 +41,9 @@ struct NetStream
 	Cond dataCond;
 	Cond headerCond;
 
-	char url[2048];
+	char url[4096];
 	uint8_t *cache = nullptr;
+	int64_t cacheSize = 0;
 	int64_t wrPos = 0;
 	int64_t rdPos = 0;
 	int64_t total = -1;
@@ -59,6 +60,12 @@ struct NetStream
 namespace {
 
 struct curl_blob caInfo = { (u8 *)cacert_pem, cacert_pem_size, CURL_BLOB_COPY };
+
+int progressCb(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+	NetStream *s = static_cast<NetStream *>(clientp);
+	return (s && s->quit) ? 1 : 0;
+}
 
 size_t headerCb(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
@@ -122,19 +129,20 @@ size_t writeCb(char *ptr, size_t size, size_t nmemb, void *userdata)
 			s->headerCond.signal();
 		}
 	}
+	int64_t cSize = s->cacheSize > 0 ? s->cacheSize : CACHE_SIZE;
 	while(done < total && !s->quit && !s->restart)
 	{
-		while(!s->quit && !s->restart && s->wrPos - s->rdPos >= CACHE_SIZE)
+		while(!s->quit && !s->restart && s->wrPos - s->rdPos >= cSize)
 			s->spaceCond.wait(s->lock);
 		if(s->quit || s->restart)
 			break;
 
-		int64_t pos = s->wrPos % CACHE_SIZE;
+		int64_t pos = s->wrPos % cSize;
 		size_t chunk = total - done;
-		if(chunk > (size_t)(CACHE_SIZE - pos))
-			chunk = CACHE_SIZE - pos;
-		if(chunk > (size_t)(CACHE_SIZE - (s->wrPos - s->rdPos)))
-			chunk = CACHE_SIZE - (s->wrPos - s->rdPos);
+		if(chunk > (size_t)(cSize - pos))
+			chunk = cSize - pos;
+		if(chunk > (size_t)(cSize - (s->wrPos - s->rdPos)))
+			chunk = cSize - (s->wrPos - s->rdPos);
 
 		memcpy(s->cache + pos, ptr + done, chunk);
 		s->wrPos += chunk;
@@ -241,7 +249,7 @@ extern "C" int netIsUrl(const char *path)
 	return strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;
 }
 
-extern "C" NetStream *netOpen(const char *url, char *err, int errSize)
+extern "C" NetStream *netOpenEx(const char *url, char *err, int errSize, int64_t cacheSize)
 {
 	if(!netInit())
 	{
@@ -252,7 +260,8 @@ extern "C" NetStream *netOpen(const char *url, char *err, int errSize)
 	NetStream *s = new NetStream();
 	snprintf(s->url, sizeof(s->url), "%s", url);
 
-	s->cache = (uint8_t *)malloc(CACHE_SIZE);
+	s->cacheSize = cacheSize > 0 ? cacheSize : CACHE_SIZE;
+	s->cache = (uint8_t *)malloc(s->cacheSize);
 	s->curl = curl_easy_init();
 	if(!s->cache || !s->curl)
 	{
@@ -274,6 +283,9 @@ extern "C" NetStream *netOpen(const char *url, char *err, int errSize)
 	curl_easy_setopt(s->curl, CURLOPT_CONNECTTIMEOUT, 15L);
 	curl_easy_setopt(s->curl, CURLOPT_NOSIGNAL, 1L);
 	curl_easy_setopt(s->curl, CURLOPT_PROTOCOLS_STR, "HTTP,HTTPS");
+	curl_easy_setopt(s->curl, CURLOPT_XFERINFOFUNCTION, progressCb);
+	curl_easy_setopt(s->curl, CURLOPT_XFERINFODATA, s);
+	curl_easy_setopt(s->curl, CURLOPT_NOPROGRESS, 0L);
 
 	if(!s->thread.start(threadEntry, s, 32 * 1024, ThreadPriority::Normal))
 	{
@@ -283,9 +295,9 @@ extern "C" NetStream *netOpen(const char *url, char *err, int errSize)
 	}
 
 	s->lock.lock();
-	while(!s->headersDone)
+	while(!s->headersDone && !s->quit)
 		s->headerCond.wait(s->lock);
-	bool ok = !s->failed && (s->httpStatus == 200 || s->httpStatus == 206);
+	bool ok = !s->quit && !s->failed && (s->httpStatus == 200 || s->httpStatus == 206);
 	char errCopy[128];
 	snprintf(errCopy, sizeof(errCopy), "%s", s->errorText);
 	s->lock.unlock();
@@ -300,7 +312,12 @@ extern "C" NetStream *netOpen(const char *url, char *err, int errSize)
 	return s;
 }
 
-extern "C" void netClose(NetStream *s)
+extern "C" NetStream *netOpen(const char *url, char *err, int errSize)
+{
+	return netOpenEx(url, err, errSize, CACHE_SIZE);
+}
+
+extern "C" void netAbort(NetStream *s)
 {
 	if(!s)
 		return;
@@ -308,7 +325,17 @@ extern "C" void netClose(NetStream *s)
 	s->lock.lock();
 	s->quit = true;
 	s->spaceCond.signal();
+	s->dataCond.signal();
+	s->headerCond.signal();
 	s->lock.unlock();
+}
+
+extern "C" void netClose(NetStream *s)
+{
+	if(!s)
+		return;
+
+	netAbort(s);
 
 	if(s->thread.isRunning())
 		s->thread.join();
@@ -322,8 +349,14 @@ extern "C" void netClose(NetStream *s)
 extern "C" int netRead(NetStream *s, uint8_t *buf, int size)
 {
 	s->lock.lock();
-	while(s->wrPos == s->rdPos && !s->eof)
+	while(s->wrPos == s->rdPos && !s->eof && !s->quit && !s->failed)
 		s->dataCond.wait(s->lock);
+
+	if(s->quit || (s->wrPos == s->rdPos && (s->eof || s->failed)))
+	{
+		s->lock.unlock();
+		return 0;
+	}
 
 	int64_t avail = s->wrPos - s->rdPos;
 	if(avail <= 0)
@@ -332,11 +365,12 @@ extern "C" int netRead(NetStream *s, uint8_t *buf, int size)
 		return 0;
 	}
 
+	int64_t cSize = s->cacheSize > 0 ? s->cacheSize : CACHE_SIZE;
 	int n = (int)(avail < size ? avail : size);
-	int64_t pos = s->rdPos % CACHE_SIZE;
+	int64_t pos = s->rdPos % cSize;
 	int first = n;
-	if(first > CACHE_SIZE - pos)
-		first = CACHE_SIZE - pos;
+	if(first > cSize - pos)
+		first = cSize - pos;
 
 	memcpy(buf, s->cache + pos, first);
 	if(n > first)

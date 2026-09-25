@@ -34,6 +34,7 @@
 #include "player.h"
 #include "decoder.h"
 #include "gxyuv.h"
+#include "youtube.h"
 
 namespace {
 
@@ -88,8 +89,10 @@ Player * active = nullptr;
 class Player
 {
 	public:
-		Player(Decoder * d, const MediaInfo & i, const char * p, const char * customTitle = nullptr) :
-			dec(d), info(i), path(p), titleOverride(customTitle) {}
+		Player(Decoder * d, const MediaInfo & i, const char * p, const char * customTitle = nullptr, const YtResult * meta = nullptr) :
+			dec(d), info(i), path(p), titleOverride(customTitle), ytMeta(meta) {}
+		Player(const char * p, const char * customTitle = nullptr, const YtResult * meta = nullptr) :
+			dec(nullptr), path(p), titleOverride(customTitle), ytMeta(meta) { memset(&info, 0, sizeof(info)); }
 		~Player();
 		PlayResult run(char * err, int errSize);
 		void feedAudio(int voice);
@@ -99,6 +102,7 @@ class Player
 		MediaInfo info;
 		const char * path;
 		const char * titleOverride;
+		const YtResult * ytMeta;
 
 		Mutex lock;
 		Thread thread;
@@ -122,6 +126,9 @@ class Player
 
 		int16_t * ring = nullptr;
 		int16_t * chunk[AUDIO_BUFFERS] = { nullptr };
+		double chunkPts[AUDIO_BUFFERS] = { 0 };
+		int playingChunk = 0;
+		uint32_t ringBaseRd = 0;
 		volatile uint32_t ringRd = 0;
 		volatile uint32_t ringWr = 0;
 		volatile uint32_t callbacks = 0;
@@ -154,6 +161,17 @@ class Player
 		void requestSeek(double t);
 		void seekBy(double delta);
 		void changeVolume(int delta);
+
+		Thread pfpThread;
+		Mutex pfpLock;
+		void * pfpTexture = nullptr;
+		int pfpWidth = 0;
+		int pfpHeight = 0;
+		volatile bool pfpReady = false;
+		volatile bool pfpStop = false;
+
+		static void * pfpEntry(void * arg);
+		void pfpLoop();
 };
 
 void audioCallback(int voice)
@@ -168,11 +186,24 @@ Player::~Player()
 		ASND_StopVoice(AUDIO_VOICE);
 
 	quit = true;
+	if(dec)
+		decAbort(dec);
 	if(thread.isRunning())
 		thread.join();
 
+	pfpStop = true;
+	if(pfpThread.isRunning())
+		pfpThread.join();
+
+	if(pfpTexture)
+	{
+		platform->getVideo()->getImageRenderer()->destroyTexture(pfpTexture);
+		pfpTexture = nullptr;
+	}
+
 	active = nullptr;
-	decClose(dec);
+	if(dec)
+		decClose(dec);
 	free(ring);
 	for(int i = 0; i < AUDIO_BUFFERS; i++)
 		free(chunk[i]);
@@ -225,6 +256,36 @@ bool Player::setup(char * err, int errSize)
 	}
 
 	return true;
+}
+
+void * Player::pfpEntry(void * arg)
+{
+	static_cast<Player *>(arg)->pfpLoop();
+	return nullptr;
+}
+
+void Player::pfpLoop()
+{
+	if(!ytMeta || !ytMeta->channelId[0])
+		return;
+
+	int w = 0, h = 0;
+	void * tex = ytFetchChannelPfp(ytMeta->channelId, 48, 48, &w, &h);
+	if(!tex)
+		return;
+
+	if(pfpStop || quit)
+	{
+		platform->getVideo()->getImageRenderer()->destroyTexture(tex);
+		return;
+	}
+
+	pfpLock.lock();
+	pfpTexture = tex;
+	pfpWidth = w;
+	pfpHeight = h;
+	pfpReady = true;
+	pfpLock.unlock();
 }
 
 void * Player::decodeEntry(void * arg)
@@ -367,9 +428,11 @@ void Player::pushAudio(const DecFrame & f)
 		return;
 	}
 
-	if(ringFresh)
+	double expectedPts = ringBasePts + (double)(ringWr - ringBaseRd) / info.sampleRate;
+	if(ringFresh || ringWr == ringRd || fabs(f.pts - expectedPts) > 0.05)
 	{
 		ringBasePts = f.pts;
+		ringBaseRd = ringWr;
 		ringFresh = false;
 	}
 	lock.unlock();
@@ -385,6 +448,7 @@ void Player::pushAudio(const DecFrame & f)
 void Player::fillChunk(int index)
 {
 	int16_t * buf = chunk[index];
+	lock.lock();
 	uint32_t avail = ringWr - ringRd;
 	uint32_t n = avail < AUDIO_CHUNK ? avail : AUDIO_CHUNK;
 	uint32_t pos = ringRd & (RING_FRAMES - 1);
@@ -394,27 +458,31 @@ void Player::fillChunk(int index)
 	memcpy(buf + first * 2, ring, (n - first) * 4);
 	memset(buf + n * 2, 0, (AUDIO_CHUNK - n) * 4);
 	BARRIER();
+	chunkPts[index] = ringBasePts + (double)(ringRd - ringBaseRd) / info.sampleRate;
 	ringRd = ringRd + n;
+	lock.unlock();
 	DCFlushRange(buf, AUDIO_CHUNK * 4);
 }
 
 void Player::feedAudio(int voice)
 {
+	playingChunk = (playingChunk + 1) % AUDIO_BUFFERS;
+	lastCallback = gettime();
+
 	fillChunk(nextChunk);
 	if(ASND_AddVoice(voice, chunk[nextChunk], AUDIO_CHUNK * 4) == SND_OK)
 		nextChunk = (nextChunk + 1) % AUDIO_BUFFERS;
-
-	callbacks = callbacks + 1;
-	lastCallback = gettime();
 }
 
 void Player::startAudio()
 {
 	fillChunk(0);
-	nextChunk = 1;
-	callbacks = 0;
+	fillChunk(1);
+	playingChunk = 0;
+	nextChunk = 2;
 	lastCallback = gettime();
 	ASND_SetVoice(AUDIO_VOICE, VOICE_STEREO_16BIT, info.sampleRate, 0, chunk[0], AUDIO_CHUNK * 4, volume, volume, audioCallback);
+	ASND_AddVoice(AUDIO_VOICE, chunk[1], AUDIO_CHUNK * 4);
 	audioRunning = true;
 }
 
@@ -422,13 +490,13 @@ void Player::tryStart()
 {
 	lock.lock();
 	uint32_t avail = ringWr - ringRd;
-	int need = slotCount < 4 ? slotCount - 1 : 3;
+	int need = slotCount < 4 ? slotCount - 1 : 2;
 	bool ready = !seekPending;
 	double firstPts = fifoCount > 0 ? framePts[fifo[fifoHead]] : 0;
 
 	if(ready && info.hasAudio)
 		ready = avail >= AUDIO_CHUNK * 2 || eof;
-	if(ready && info.hasVideo && (!info.hasAudio || avail < RING_FRAMES / 2))
+	if(ready && info.hasVideo)
 		ready = fifoCount >= need || eof;
 	lock.unlock();
 
@@ -451,19 +519,20 @@ double Player::clock()
 	if(paused)
 		return pausedClock;
 
-	if(info.hasAudio)
+	if(info.hasAudio && audioRunning)
 	{
 		uint64_t last;
-		do
+		int curChunk;
+		do {
 			last = lastCallback;
-		while(last != lastCallback);
+			curChunk = playingChunk;
+		} while(last != lastCallback);
 
-		uint32_t cb = callbacks;
 		double chunkSecs = (double)AUDIO_CHUNK / info.sampleRate;
 		double elapsed = ticks_to_millisecs(gettime() - last) / 1000.0;
 		if(elapsed > chunkSecs)
 			elapsed = chunkSecs;
-		return ringBasePts + (cb > 0 ? cb - 1 : 0) * chunkSecs + elapsed;
+		return chunkPts[curChunk] + elapsed;
 	}
 
 	return baseClock + ticks_to_millisecs(gettime() - wallStart) / 1000.0;
@@ -565,8 +634,37 @@ void Player::changeVolume(int delta)
 
 PlayResult Player::run(char * err, int errSize)
 {
-	if(!setup(err, errSize))
-		return PLAY_ERROR;
+	struct OpenTask
+	{
+		const char * path;
+		MediaInfo info;
+		char err[128];
+		Decoder * dec = nullptr;
+		volatile bool done = false;
+	} task;
+
+	task.path = path;
+	task.err[0] = '\0';
+	task.done = false;
+
+	Thread openThread;
+	bool opening = false;
+
+	if(!dec)
+	{
+		opening = true;
+		openThread.start([](void * arg) -> void * {
+			OpenTask * t = static_cast<OpenTask *>(arg);
+			t->dec = decOpen(t->path, &t->info, t->err, sizeof(t->err));
+			t->done = true;
+			return nullptr;
+		}, &task, 128 * 1024, ThreadPriority::Normal);
+	}
+	else
+	{
+		if(!setup(err, errSize))
+			return PLAY_ERROR;
+	}
 
 	const PixelColor white = {255, 255, 255, 255};
 	const PixelColor accent = {0, 120, 215, 255};
@@ -586,12 +684,44 @@ PlayResult Player::run(char * err, int errSize)
 
 	GuiImage background(screenWidth, screenHeight, (PixelColor){18, 20, 28, 255});
 	GuiImage accentBar(240, 3, accent);
-	GuiImage topBg(screenWidth, 56, (PixelColor){0, 0, 0, 255});
+	GuiImage topBg(screenWidth, ytMeta ? 70 : 56, (PixelColor){0, 0, 0, 255});
 	topBg.setAlpha(170);
-	GuiText nameTxt(displayTitle, 24, white);
+
+	pfpTexture = nullptr;
+	pfpWidth = 0;
+	pfpHeight = 0;
+	pfpReady = false;
+	pfpStop = false;
+
+	if(ytMeta && ytMeta->channelId[0])
+		pfpThread.start(pfpEntry, this, 32 * 1024, ThreadPriority::Normal);
+
+	GuiImageData * pfpData = nullptr;
+	GuiImage * pfpImg = nullptr;
+	bool pfpApplied = false;
+	int textX = ytMeta ? 72 : 40;
+
+	GuiText nameTxt(displayTitle, ytMeta ? 20 : 24, white);
 	nameTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
-	nameTxt.setPosition(40, 15);
-	nameTxt.setMaxWidth(560);
+	nameTxt.setPosition(textX, ytMeta ? 12 : 15);
+	nameTxt.setMaxWidth(screenWidth - textX - 20);
+
+	GuiText chanTxt((ytMeta && ytMeta->author[0]) ? ytMeta->author : "", 15, (PixelColor){220, 225, 235, 255});
+	chanTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	chanTxt.setPosition(textX, 39);
+
+	int chanW = chanTxt.getTextWidth();
+	int dateX = textX + chanW + (chanW > 0 ? 14 : 0);
+	GuiText dateTxt((ytMeta && ytMeta->publishedText[0]) ? ytMeta->publishedText : "", 14, (PixelColor){160, 165, 180, 255});
+	dateTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	dateTxt.setPosition(dateX, 40);
+
+	int dateW = dateTxt.getTextWidth();
+	int viewsX = dateX + dateW + (dateW > 0 ? 14 : 0);
+	GuiText viewsTxt((ytMeta && ytMeta->viewCountText[0]) ? ytMeta->viewCountText : "", 14, (PixelColor){160, 165, 180, 255});
+	viewsTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	viewsTxt.setPosition(viewsX, 40);
+
 	GuiImage knob(12, 20, white);
 	knob.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
 	knob.setPosition(TRACK_MARGIN - 6, -115);
@@ -652,18 +782,28 @@ PlayResult Player::run(char * err, int errSize)
 	UiButton volDownBtn(&btnSmall, &btnSmallOver, &iconVolDown, 200, &trigA);
 	UiButton volUpBtn(&btnSmall, &btnSmallOver, &iconVolUp, 260, &trigA);
 
-	if(!info.hasVideo)
+	GuiText loadingTxt("Loading...", 24, white);
+	loadingTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	loadingTxt.setPosition(0, -20);
+
+	ui.append(&background);
+	if(ytMeta || !dec || info.hasVideo)
 	{
-		ui.append(&background);
+		ui.append(&topBg);
+		ui.append(&nameTxt);
+		if(ytMeta)
+		{
+			if(ytMeta->author[0]) ui.append(&chanTxt);
+			if(ytMeta->publishedText[0]) ui.append(&dateTxt);
+			if(ytMeta->viewCountText[0]) ui.append(&viewsTxt);
+		}
+	}
+	else
+	{
 		ui.append(&titleTxt);
 		ui.append(&artistTxt);
 		ui.append(&albumTxt);
 		ui.append(&accentBar);
-	}
-	else
-	{
-		ui.append(&topBg);
-		ui.append(&nameTxt);
 	}
 	ui.append(&barBg);
 	ui.append(&trackBg);
@@ -678,6 +818,7 @@ PlayResult Player::run(char * err, int errSize)
 	ui.append(&fwdBtn.button);
 	ui.append(&volDownBtn.button);
 	ui.append(&volUpBtn.button);
+	ui.append(&loadingTxt);
 
 	OgcVideoDriver * ogcVideo = static_cast<OgcVideoDriver *>(video);
 	float lastX[4] = { -1, -1, -1, -1 };
@@ -688,6 +829,8 @@ PlayResult Player::run(char * err, int errSize)
 	bool lastPaused = false;
 	int scrubChan = -1;
 	double scrubTarget = 0;
+	int loadAnim = 0;
+	bool loadingUiActive = true;
 	PlayResult result = PLAY_DONE;
 
 	for(;;)
@@ -716,10 +859,16 @@ PlayResult Player::run(char * err, int errSize)
 		}
 
 		idle = (pressed || moved) ? 0 : idle + 1;
-		bool uiVisible = !info.hasVideo || paused || idle < UI_HIDE_FRAMES;
+		bool uiVisible = !started || !info.hasVideo || paused || idle < UI_HIDE_FRAMES;
 
 		if(pressed & (INPUT_BTN_B | INPUT_BTN_1))
+		{
+			if(opening && task.dec)
+				decAbort(task.dec);
+			else if(dec)
+				decAbort(dec);
 			break;
+		}
 		if(pressed & (INPUT_BTN_PLUS | INPUT_BTN_2))
 			togglePause();
 		if(pressed & INPUT_BTN_RIGHT)
@@ -730,6 +879,70 @@ PlayResult Player::run(char * err, int errSize)
 			changeVolume(VOLUME_STEP);
 		if(pressed & INPUT_BTN_DOWN)
 			changeVolume(-VOLUME_STEP);
+
+		if(opening)
+		{
+			if(task.done)
+			{
+				openThread.join();
+				opening = false;
+
+				if(!task.dec)
+				{
+					snprintf(err, errSize, "%s", task.err[0] ? task.err : "Could not open stream");
+					result = PLAY_ERROR;
+					break;
+				}
+
+				dec = task.dec;
+				info = task.info;
+
+				if(!setup(err, errSize))
+				{
+					result = PLAY_ERROR;
+					break;
+				}
+
+				if(!info.hasVideo && !ytMeta)
+				{
+					ui.remove(&topBg);
+					ui.remove(&nameTxt);
+					ui.append(&titleTxt);
+					ui.append(&artistTxt);
+					ui.append(&albumTxt);
+					ui.append(&accentBar);
+				}
+
+				if((!titleOverride || !titleOverride[0]) && info.title[0])
+				{
+					nameTxt.setText(info.title);
+					titleTxt.setText(info.title);
+				}
+				if(info.artist[0]) artistTxt.setText(info.artist);
+				if(info.album[0]) albumTxt.setText(info.album);
+			}
+		}
+
+		if(!pfpApplied && pfpReady)
+		{
+			pfpLock.lock();
+			void * tex = pfpTexture;
+			int w = pfpWidth;
+			int h = pfpHeight;
+			pfpTexture = nullptr;
+			pfpLock.unlock();
+
+			if(tex)
+			{
+				pfpData = new GuiImageData(tex, w, h, true);
+				pfpImg = new GuiImage(pfpData);
+				pfpImg->setSize(46, 46);
+				pfpImg->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+				pfpImg->setPosition(16, 12);
+				ui.append(pfpImg);
+			}
+			pfpApplied = true;
+		}
 
 		if(uiVisible)
 		{
@@ -747,7 +960,13 @@ PlayResult Player::run(char * err, int errSize)
 			if(volUpBtn.clicked())
 				changeVolume(VOLUME_STEP);
 			if(stopBtn.clicked())
+			{
+				if(opening && task.dec)
+					decAbort(task.dec);
+				else if(dec)
+					decAbort(dec);
 				break;
+			}
 
 			if(seekBtn.getState() == STATE::CLICKED && scrubChan < 0)
 			{
@@ -772,7 +991,27 @@ PlayResult Player::run(char * err, int errSize)
 		}
 
 		if(!started)
-			tryStart();
+		{
+			if(dec)
+				tryStart();
+
+			if(started && loadingUiActive)
+			{
+				loadingUiActive = false;
+				ui.remove(&loadingTxt);
+				if(info.hasVideo)
+					ui.remove(&background);
+			}
+			else if(loadingUiActive)
+			{
+				int dot = (loadAnim / 15) % 4;
+				if(dot == 0) loadingTxt.setText("Loading");
+				else if(dot == 1) loadingTxt.setText("Loading.");
+				else if(dot == 2) loadingTxt.setText("Loading..");
+				else loadingTxt.setText("Loading...");
+				loadAnim++;
+			}
+		}
 		if(started && !paused && info.hasVideo)
 			consumeVideo(clock());
 
@@ -783,6 +1022,13 @@ PlayResult Player::run(char * err, int errSize)
 				snprintf(err, errSize, "%s", errorText);
 				result = PLAY_ERROR;
 			}
+			break;
+		}
+
+		if(failed)
+		{
+			snprintf(err, errSize, "%s", errorText[0] ? errorText : "Playback error");
+			result = PLAY_ERROR;
 			break;
 		}
 
@@ -837,20 +1083,44 @@ PlayResult Player::run(char * err, int errSize)
 		video->render();
 	}
 
+	if(opening)
+	{
+		if(task.dec)
+			decAbort(task.dec);
+		openThread.join();
+		if(task.dec)
+		{
+			decClose(task.dec);
+			task.dec = nullptr;
+		}
+	}
+
+	pfpStop = true;
+	if(pfpThread.isRunning())
+		pfpThread.join();
+
+	if(pfpTexture)
+	{
+		platform->getVideo()->getImageRenderer()->destroyTexture(pfpTexture);
+		pfpTexture = nullptr;
+	}
+
+	if(pfpImg)
+		ui.remove(pfpImg);
+	delete pfpImg;
+	pfpImg = nullptr;
+	delete pfpData;
+	pfpData = nullptr;
+
+	ui.removeAll();
+
 	return result;
 }
 
 }
 
-PlayResult PlayFile(const char * path, char * err, int errSize, const char * customTitle)
+PlayResult PlayFile(const char * path, char * err, int errSize, const char * customTitle, const YtResult * ytMeta)
 {
-	MediaInfo info;
-
-	snprintf(err, errSize, "Could not open file");
-	Decoder * dec = decOpen(path, &info, err, errSize);
-	if(!dec)
-		return PLAY_ERROR;
-
-	Player player(dec, info, path, customTitle);
+	Player player(path, customTitle, ytMeta);
 	return player.run(err, errSize);
 }

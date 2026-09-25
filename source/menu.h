@@ -29,5 +29,6 @@ enum
 void MainMenu();
 void DrawPointers();
 int WindowPrompt(const char * title, const char * msg, const char * btn1Label, const char * btn2Label);
+bool RunWithLoadingScreen(const char * title, const char * msg, volatile bool & done);
 
 #endif

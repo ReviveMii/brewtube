@@ -40,6 +40,7 @@ public:
 	size_t size() const;
 	const char *asString(const char *def = "") const;
 	int asInt(int def = 0) const;
+	bool asBool(bool def = false) const;
 };
 
 bool jsonParse(const char *text, size_t len, JsonValue &out);

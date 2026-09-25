@@ -26,6 +26,8 @@ enum PlayResult
 	PLAY_EXIT
 };
 
-PlayResult PlayFile(const char * path, char * err, int errSize, const char * customTitle = nullptr);
+struct YtResult;
+
+PlayResult PlayFile(const char * path, char * err, int errSize, const char * customTitle = nullptr, const YtResult * ytMeta = nullptr);
 
 #endif

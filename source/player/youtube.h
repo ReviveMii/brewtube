@@ -24,6 +24,7 @@
 struct YtResult
 {
 	char videoId[16];
+	char channelId[64];
 	char title[160];
 	char author[96];
 	char lengthText[16];
@@ -31,8 +32,20 @@ struct YtResult
 	char publishedText[32];
 };
 
+enum YtClientType
+{
+	YT_CLIENT_ANDROID = 0,
+	YT_CLIENT_VISIONOS = 1
+};
+
+void ytSetClient(YtClientType client);
+YtClientType ytGetClient();
+
 int ytSearch(const char *query, YtResult *results, int maxResults, char *err, int errSize);
-bool ytResolveStream(const char *videoId, char *urlOut, int urlOutSize, char *err, int errSize);
+bool ytResolveStream(const char *videoId, char *urlOut, int urlOutSize, char *err, int errSize, YtResult *infoOut = nullptr);
 void *ytFetchThumbnail(const char *videoId, int maxW, int maxH, int *outW, int *outH);
+void *ytFetchChannelPfp(const char *channelId, int maxW, int maxH, int *outW, int *outH);
+void ytStartUpdateCheck();
+bool ytIsUpdateAvailable();
 
 #endif

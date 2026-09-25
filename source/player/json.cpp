@@ -60,6 +60,11 @@ int JsonValue::asInt(int def) const
 	return type == JsonType::Number ? (int)numVal : def;
 }
 
+bool JsonValue::asBool(bool def) const
+{
+	return type == JsonType::Bool ? boolVal : def;
+}
+
 namespace {
 
 struct Parser

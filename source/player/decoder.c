@@ -64,11 +64,30 @@ struct Decoder {
 	int16_t *pcm;
 	int pcmCap;
 	char error[128];
+
+	NetStream *netAudio;
+	AVFormatContext *fmtAudio;
+	AVIOContext *ioAudio;
+	AVPacket origAudio;
+	AVPacket pktAudio;
+	int havePktAudio;
+	int audioEof;
+	int videoEof;
+	int abort;
 };
+
+static int checkInterrupt(void *opaque)
+{
+	Decoder *d = (Decoder *)opaque;
+	return (d && d->abort) ? 1 : 0;
+}
 
 static int ioRead(void *opaque, uint8_t *buf, int size)
 {
 	Decoder *d = opaque;
+
+	if (d->abort)
+		return 0;
 
 	if (d->net)
 		return netRead(d->net, buf, size);
@@ -94,6 +113,30 @@ static int64_t ioSeek(void *opaque, int64_t offset, int whence)
 
 	off_t r = lseek(d->fd, offset, w);
 	return r < 0 ? -1 : r;
+}
+
+static int ioReadAudio(void *opaque, uint8_t *buf, int size)
+{
+	Decoder *d = opaque;
+	if (d->abort)
+		return 0;
+	if (d->netAudio)
+		return netRead(d->netAudio, buf, size);
+	return 0;
+}
+
+static int64_t ioSeekAudio(void *opaque, int64_t offset, int whence)
+{
+	Decoder *d = opaque;
+	if (whence & AVSEEK_SIZE) {
+		if (d->netAudio)
+			return netSize(d->netAudio);
+		return -1;
+	}
+	int w = whence & ~AVSEEK_FORCE;
+	if (d->netAudio)
+		return netSeek(d->netAudio, offset, w);
+	return -1;
 }
 
 static void setText(char *dst, AVDictionary *meta, const char *key)
@@ -161,49 +204,137 @@ Decoder *decOpen(const char *path, MediaInfo *info, char *err, int errSize)
 	d->vIndex = d->aIndex = -1;
 	d->seekV = d->seekA = -1;
 
-	if (netIsUrl(path)) {
-		d->net = netOpen(path, err, errSize);
+	const char *sep = strchr(path, '\n');
+	if (sep) {
+		char vPath[4096];
+		char aPath[4096];
+		size_t vLen = sep - path;
+		if (vLen >= sizeof(vPath)) vLen = sizeof(vPath) - 1;
+		memcpy(vPath, path, vLen);
+		vPath[vLen] = '\0';
+		snprintf(aPath, sizeof(aPath), "%s", sep + 1);
+
+		d->net = netOpen(vPath, err, errSize);
 		if (!d->net) {
 			free(d);
 			return NULL;
 		}
-	} else {
-		d->fd = open(path, O_RDONLY);
-		if (d->fd < 0)
+
+		uint8_t *buf = av_malloc(IO_BUFFER_SIZE);
+		d->io = buf ? avio_alloc_context(buf, IO_BUFFER_SIZE, 0, d, ioRead, NULL, ioSeek) : NULL;
+		d->fmt = avformat_alloc_context();
+		if (!d->io || !d->fmt)
 			goto fail;
-	}
 
-	uint8_t *buf = av_malloc(IO_BUFFER_SIZE);
-	d->io = buf ? avio_alloc_context(buf, IO_BUFFER_SIZE, 0, d, ioRead, NULL, ioSeek) : NULL;
-	d->fmt = avformat_alloc_context();
-	if (!d->io || !d->fmt)
-		goto fail;
+		d->fmt->pb = d->io;
+		d->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+		d->fmt->interrupt_callback.callback = checkInterrupt;
+		d->fmt->interrupt_callback.opaque = d;
 
-	d->fmt->pb = d->io;
-	d->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+		msg = "Unsupported video format";
+		if (avformat_open_input(&d->fmt, vPath, NULL, NULL) < 0)
+			goto fail;
+		if (avformat_find_stream_info(d->fmt, NULL) < 0)
+			goto fail;
 
-	msg = "Unsupported file format";
-	if (avformat_open_input(&d->fmt, path, NULL, NULL) < 0)
-		goto fail;
-	if (avformat_find_stream_info(d->fmt, NULL) < 0)
-		goto fail;
+		for (unsigned i = 0; i < d->fmt->nb_streams; i++) {
+			AVStream *st = d->fmt->streams[i];
+			AVCodecContext *c = st->codec;
 
-	for (unsigned i = 0; i < d->fmt->nb_streams; i++) {
-		AVStream *st = d->fmt->streams[i];
-		AVCodecContext *c = st->codec;
+			if (c->codec_type == AVMEDIA_TYPE_VIDEO && d->vIndex < 0 && c->codec_id == CODEC_ID_H264)
+				d->vIndex = i;
+			else
+				st->discard = AVDISCARD_ALL;
+		}
 
-		if (c->codec_type == AVMEDIA_TYPE_VIDEO && d->vIndex < 0 && c->codec_id == CODEC_ID_H264)
-			d->vIndex = i;
-		else if (c->codec_type == AVMEDIA_TYPE_AUDIO && d->aIndex < 0 &&
-			(c->codec_id == CODEC_ID_AAC || c->codec_id == CODEC_ID_MP3))
-			d->aIndex = i;
-		else
-			st->discard = AVDISCARD_ALL;
-	}
+		if (d->vIndex < 0) {
+			msg = "No H.264 video stream found";
+			goto fail;
+		}
 
-	if (d->vIndex < 0 && d->aIndex < 0) {
-		msg = "No H.264 video or AAC/MP3 audio stream found";
-		goto fail;
+		d->netAudio = netOpenEx(aPath, err, errSize, 256 * 1024);
+		if (!d->netAudio)
+			goto fail;
+
+		uint8_t *bufA = av_malloc(IO_BUFFER_SIZE);
+		d->ioAudio = bufA ? avio_alloc_context(bufA, IO_BUFFER_SIZE, 0, d, ioReadAudio, NULL, ioSeekAudio) : NULL;
+		d->fmtAudio = avformat_alloc_context();
+		if (!d->ioAudio || !d->fmtAudio)
+			goto fail;
+
+		d->fmtAudio->pb = d->ioAudio;
+		d->fmtAudio->flags |= AVFMT_FLAG_CUSTOM_IO;
+		d->fmtAudio->interrupt_callback.callback = checkInterrupt;
+		d->fmtAudio->interrupt_callback.opaque = d;
+
+		msg = "Unsupported audio format";
+		if (avformat_open_input(&d->fmtAudio, aPath, NULL, NULL) < 0)
+			goto fail;
+		if (avformat_find_stream_info(d->fmtAudio, NULL) < 0)
+			goto fail;
+
+		for (unsigned i = 0; i < d->fmtAudio->nb_streams; i++) {
+			AVStream *st = d->fmtAudio->streams[i];
+			AVCodecContext *c = st->codec;
+
+			if (c->codec_type == AVMEDIA_TYPE_AUDIO && d->aIndex < 0 &&
+				(c->codec_id == CODEC_ID_AAC || c->codec_id == CODEC_ID_MP3))
+				d->aIndex = i;
+			else
+				st->discard = AVDISCARD_ALL;
+		}
+
+		if (d->aIndex < 0) {
+			msg = "No AAC/MP3 audio stream found";
+			goto fail;
+		}
+	} else {
+		if (netIsUrl(path)) {
+			d->net = netOpen(path, err, errSize);
+			if (!d->net) {
+				free(d);
+				return NULL;
+			}
+		} else {
+			d->fd = open(path, O_RDONLY);
+			if (d->fd < 0)
+				goto fail;
+		}
+
+		uint8_t *buf = av_malloc(IO_BUFFER_SIZE);
+		d->io = buf ? avio_alloc_context(buf, IO_BUFFER_SIZE, 0, d, ioRead, NULL, ioSeek) : NULL;
+		d->fmt = avformat_alloc_context();
+		if (!d->io || !d->fmt)
+			goto fail;
+
+		d->fmt->pb = d->io;
+		d->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+		d->fmt->interrupt_callback.callback = checkInterrupt;
+		d->fmt->interrupt_callback.opaque = d;
+
+		msg = "Unsupported file format";
+		if (avformat_open_input(&d->fmt, path, NULL, NULL) < 0)
+			goto fail;
+		if (avformat_find_stream_info(d->fmt, NULL) < 0)
+			goto fail;
+
+		for (unsigned i = 0; i < d->fmt->nb_streams; i++) {
+			AVStream *st = d->fmt->streams[i];
+			AVCodecContext *c = st->codec;
+
+			if (c->codec_type == AVMEDIA_TYPE_VIDEO && d->vIndex < 0 && c->codec_id == CODEC_ID_H264)
+				d->vIndex = i;
+			else if (c->codec_type == AVMEDIA_TYPE_AUDIO && d->aIndex < 0 &&
+				(c->codec_id == CODEC_ID_AAC || c->codec_id == CODEC_ID_MP3))
+				d->aIndex = i;
+			else
+				st->discard = AVDISCARD_ALL;
+		}
+
+		if (d->vIndex < 0 && d->aIndex < 0) {
+			msg = "No H.264 video or AAC/MP3 audio stream found";
+			goto fail;
+		}
 	}
 
 	d->startTime = d->fmt->start_time != AV_NOPTS_VALUE ? (double)d->fmt->start_time / AV_TIME_BASE : 0;
@@ -239,13 +370,14 @@ Decoder *decOpen(const char *path, MediaInfo *info, char *err, int errSize)
 	}
 
 	if (d->aIndex >= 0) {
-		d->actx = d->fmt->streams[d->aIndex]->codec;
+		AVFormatContext *afmt = d->fmtAudio ? d->fmtAudio : d->fmt;
+		d->actx = afmt->streams[d->aIndex]->codec;
 		if (d->actx->channels < 1 || d->actx->channels > MAX_CHANNELS || !openCodec(d->actx)) {
 			if (d->vIndex < 0) {
 				msg = "Could not open audio decoder";
 				goto fail;
 			}
-			d->fmt->streams[d->aIndex]->discard = AVDISCARD_ALL;
+			afmt->streams[d->aIndex]->discard = AVDISCARD_ALL;
 			d->aIndex = -1;
 			d->actx = NULL;
 		} else {
@@ -261,6 +393,8 @@ Decoder *decOpen(const char *path, MediaInfo *info, char *err, int errSize)
 
 	if (d->fmt->duration != AV_NOPTS_VALUE)
 		info->duration = (double)d->fmt->duration / AV_TIME_BASE;
+	else if (d->fmtAudio && d->fmtAudio->duration != AV_NOPTS_VALUE)
+		info->duration = (double)d->fmtAudio->duration / AV_TIME_BASE;
 
 	setText(info->title, d->fmt->metadata, "title");
 	setText(info->artist, d->fmt->metadata, "artist");
@@ -274,13 +408,30 @@ fail:
 	return NULL;
 }
 
+void decAbort(Decoder *d)
+{
+	if (!d)
+		return;
+
+	d->abort = 1;
+	if (d->net)
+		netAbort(d->net);
+	if (d->netAudio)
+		netAbort(d->netAudio);
+}
+
 void decClose(Decoder *d)
 {
 	if (!d)
 		return;
 
+	decAbort(d);
+
 	if (d->havePkt)
 		av_free_packet(&d->orig);
+	if (d->havePktAudio)
+		av_free_packet(&d->origAudio);
+
 	if (d->fmt)
 		avformat_close_input(&d->fmt);
 	if (d->io) {
@@ -291,6 +442,16 @@ void decClose(Decoder *d)
 		netClose(d->net);
 	else if (d->fd > 0)
 		close(d->fd);
+
+	if (d->fmtAudio)
+		avformat_close_input(&d->fmtAudio);
+	if (d->ioAudio) {
+		av_free(d->ioAudio->buffer);
+		av_free(d->ioAudio);
+	}
+	if (d->netAudio)
+		netClose(d->netAudio);
+
 	av_free(d->frame);
 	free(d->pcm);
 	free(d);
@@ -314,9 +475,23 @@ static void dropPacket(Decoder *d)
 	d->havePkt = 0;
 }
 
+static void dropPacketAudio(Decoder *d)
+{
+	if (d->havePktAudio)
+		av_free_packet(&d->origAudio);
+	d->havePktAudio = 0;
+}
+
 static double toSeconds(Decoder *d, int stream, int64_t ts)
 {
 	return ts * av_q2d(d->fmt->streams[stream]->time_base) - d->startTime;
+}
+
+static double toSecondsAudio(Decoder *d, int stream, int64_t ts)
+{
+	AVFormatContext *afmt = d->fmtAudio ? d->fmtAudio : d->fmt;
+	double aStart = d->fmtAudio && d->fmtAudio->start_time != AV_NOPTS_VALUE ? (double)d->fmtAudio->start_time / AV_TIME_BASE : d->startTime;
+	return ts * av_q2d(afmt->streams[stream]->time_base) - aStart;
 }
 
 static int videoOut(Decoder *d, DecFrame *out)
@@ -411,6 +586,84 @@ DecResult decNext(Decoder *d, DecFrame *out)
 	for (;;) {
 		int got = 0, r;
 
+		if (d->fmtAudio) {
+			if (d->videoEof && (d->audioEof || !d->actx))
+				return DEC_EOF;
+
+			int wantAudio = d->actx && !d->audioEof && (d->nextAudioPts <= d->lastVideoPts || !d->vctx || d->videoEof);
+
+			if (wantAudio) {
+				if (d->havePktAudio) {
+					int used = avcodec_decode_audio4(d->actx, d->frame, &got, &d->pktAudio);
+					if (used <= 0) {
+						dropPacketAudio(d);
+						continue;
+					}
+					d->pktAudio.data += used;
+					d->pktAudio.size -= used;
+					if (d->pktAudio.size <= 0)
+						dropPacketAudio(d);
+					if (got && (r = audioOut(d, out)) != 0)
+						return r > 0 ? DEC_AUDIO : DEC_ERROR;
+					continue;
+				}
+
+				if (av_read_frame(d->fmtAudio, &d->origAudio) < 0) {
+					d->audioEof = 1;
+					continue;
+				}
+
+				d->pktAudio = d->origAudio;
+				d->havePktAudio = 1;
+
+				if (d->origAudio.stream_index == d->aIndex && d->origAudio.pts != AV_NOPTS_VALUE) {
+					d->pendingAudioPts = toSecondsAudio(d, d->aIndex, d->origAudio.pts);
+					d->pendingValid = 1;
+				} else if (d->origAudio.stream_index != d->aIndex) {
+					dropPacketAudio(d);
+				}
+				continue;
+			}
+
+			if (d->havePkt) {
+				avcodec_decode_video2(d->vctx, d->frame, &got, &d->pkt);
+				dropPacket(d);
+				if (got && (r = videoOut(d, out)) != 0)
+					return r > 0 ? DEC_VIDEO : DEC_ERROR;
+				continue;
+			}
+
+			if (d->draining) {
+				AVPacket empty;
+				av_init_packet(&empty);
+				empty.data = NULL;
+				empty.size = 0;
+				avcodec_decode_video2(d->vctx, d->frame, &got, &empty);
+				if (!got) {
+					d->videoEof = 1;
+					continue;
+				}
+				if ((r = videoOut(d, out)) != 0)
+					return r > 0 ? DEC_VIDEO : DEC_ERROR;
+				continue;
+			}
+
+			if (av_read_frame(d->fmt, &d->orig) < 0) {
+				if (!d->vctx)
+					d->videoEof = 1;
+				else
+					d->draining = 1;
+				continue;
+			}
+
+			d->pkt = d->orig;
+			d->havePkt = 1;
+
+			if (d->orig.stream_index != d->vIndex)
+				dropPacket(d);
+			continue;
+		}
+
 		if (d->havePkt) {
 			if (d->pkt.stream_index == d->aIndex) {
 				int used = avcodec_decode_audio4(d->actx, d->frame, &got, &d->pkt);
@@ -475,6 +728,13 @@ int decSeek(Decoder *d, double seconds)
 		return -1;
 
 	dropPacket(d);
+	if (d->fmtAudio) {
+		av_seek_frame(d->fmtAudio, -1, ts, AVSEEK_FLAG_BACKWARD);
+		dropPacketAudio(d);
+		d->audioEof = 0;
+	}
+	d->videoEof = 0;
+
 	if (d->vctx)
 		avcodec_flush_buffers(d->vctx);
 	if (d->actx)

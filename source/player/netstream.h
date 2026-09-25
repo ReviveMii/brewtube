@@ -30,6 +30,8 @@ typedef struct NetStream NetStream;
 int netInit(void);
 int netIsUrl(const char *path);
 NetStream *netOpen(const char *url, char *err, int errSize);
+NetStream *netOpenEx(const char *url, char *err, int errSize, int64_t cacheSize);
+void netAbort(NetStream *n);
 void netClose(NetStream *n);
 int netRead(NetStream *n, uint8_t *buf, int size);
 int64_t netSeek(NetStream *n, int64_t offset, int whence);
