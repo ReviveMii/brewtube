@@ -1,0 +1,55 @@
+/****************************************************************************
+ * libgui Template
+ * Daryl Borth 2009-2026
+ * filebrowser.h
+ * Generic file routines - reading, writing, browsing
+ ****************************************************************************/
+
+#ifndef _FILEBROWSER_H_
+#define _FILEBROWSER_H_
+
+#include <unistd.h>
+#define MAXPATHLEN 1024
+#define MAXJOLIET 255
+#define MAXDISPLAY 45
+
+typedef struct
+{
+	char dir[MAXPATHLEN]; // directory path of browserList
+	int numEntries; // # of entries in browserList
+	int selIndex; // currently selected index of browserList
+	int pageIndex; // starting index of browserList page display
+} BROWSERINFO;
+
+typedef struct
+{
+	char isdir; // 0 - file, 1 - directory
+	char filename[MAXJOLIET + 1]; // full filename
+	char displayname[MAXDISPLAY + 1]; // name for browser display
+	int deviceId;
+} BROWSERENTRY;
+
+extern BROWSERINFO browser;
+extern BROWSERENTRY * browserList;
+extern char rootdir[128];
+extern bool browserDeviceListChanged;
+
+//! Which device rootdir currently belongs to
+extern int rootDeviceId;
+
+//! Set by ParseDirectory() when opendir() fails and it falls back to the device list
+extern char browserErrorMsg[256];
+
+int UpdateDirName();
+int FileSortCallback(const void *f1, const void *f2);
+void ResetBrowser();
+int BrowserChangeFolder();
+int ParseDeviceList();
+int ParseDirectory();
+void GetSelectedPath(char * out);
+
+void InitDeviceCheckingThread();
+void ResumeDeviceCheckingThread();
+void HaltDeviceCheckingThread();
+
+#endif

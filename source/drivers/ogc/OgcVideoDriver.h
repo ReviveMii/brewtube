@@ -1,0 +1,79 @@
+/****************************************************************************
+ * Platform Abstraction Layer (OGC driver)
+ * Daryl Borth 2026
+ * OgcVideoDriver.h
+ ***************************************************************************/
+#pragma once
+
+#include <gccore.h>
+#include "../VideoDriver.h"
+
+//!GC/Wii VideoDriver: raw GX, double-buffered XFB.
+class OgcVideoDriver : public VideoDriver
+{
+	public:
+		OgcVideoDriver();
+		~OgcVideoDriver() override;
+
+		void init(int width, int height) override;
+		void shutdown() override;
+		void render() override;
+		void clearScreen(const PixelColor& color) override;
+
+		int getScreenWidth() const override { return screenWidth; }
+		int getScreenHeight() const override { return screenHeight; }
+		int getRefreshRate() const override { return vmode && (vmode->viTVMode >> 2) == VI_PAL ? 50 : 60; }
+		float getDeltaTime() const override { return vmode && (vmode->viTVMode >> 2) == VI_PAL ? (1.0f / 50.0f) : (1.0f / 60.0f); }
+		uint32_t getFrameTimer() override { return frameTimer; }
+
+		ImageRenderer* getImageRenderer() override { return imageRenderer; }
+		GlyphRenderer* getGlyphRenderer() override { return glyphRenderer; }
+
+		void resetVideoMenu();
+		GXRModeObj* getMode() const { return vmode; }
+
+	private:
+		int screenWidth = 0;
+		int screenHeight = 0;
+		uint32_t frameTimer = 0;
+		uint32_t* xfb[2] = { nullptr, nullptr };
+		int whichfb = 0;
+		GXRModeObj* vmode = nullptr;
+		void* gp_fifo = nullptr;
+
+		ImageRenderer* imageRenderer;
+		GlyphRenderer* glyphRenderer;
+};
+
+//!GX-backed ImageRenderer for GuiImage/GuiImageData textures.
+class OgcImageRenderer : public ImageRenderer
+{
+	public:
+		void * createTexture(int width, int height) override;
+		void loadTextureData(void * texture, const uint8_t * rgba, int width, int height) override;
+		void destroyTexture(void * texture) override;
+		void drawTexture(void * texture, float xpos, float ypos, uint16_t width, uint16_t height, float degrees, float scaleX, float scaleY, uint8_t alpha, uint16_t texWidth = 0, uint16_t texHeight = 0) override;
+		void drawRectangle(float x, float y, float width, float height, PixelColor color) override;
+};
+
+//!GX-backed GlyphRenderer for GuiTextRenderer. Tracks its own GX vertex
+//!format index (see setVertexFormat()) so it can be reused across draws.
+class OgcGlyphRenderer : public GlyphRenderer {
+	private:
+		uint8_t vertexIndex;
+
+	public:
+		//!\param vtxFmtIndex GX vertex format slot this renderer's draws use
+		OgcGlyphRenderer(uint8_t vtxFmtIndex = GX_VTXFMT1);
+		~OgcGlyphRenderer() override;
+
+		void* createTexture(uint16_t width, uint16_t height) override;
+		void loadTextureData(void* texture, FT_Bitmap* bitmap) override;
+		void destroyTexture(void* texture) override;
+
+		void drawQuad(void* texture, int16_t screenX, int16_t screenY, uint16_t width, uint16_t height, const PixelColor& color) override;
+		void drawFeature(int16_t screenX, int16_t screenY, uint16_t width, uint16_t height, const PixelColor& color) override;
+
+		//!Changes which GX vertex format slot subsequent draws use.
+		void setVertexFormat(uint8_t vtxFmtIndex);
+};
