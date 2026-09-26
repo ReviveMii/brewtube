@@ -26,6 +26,7 @@
 #include <ogc/lwp_watchdog.h>
 
 #include "libgui/Gui.h"
+#include "libgui/GuiTextRenderer.h"
 #include "drivers/Platform.h"
 #include "drivers/Thread.h"
 #include "drivers/ogc/OgcVideoDriver.h"
@@ -51,6 +52,26 @@ const int TRACK_MARGIN = 40;
 const int BTN_BOTTOM_CENTER = 44;
 
 #define BARRIER() __asm__ volatile("" ::: "memory")
+
+void formatVoteNumber(long num, char *out, size_t outSize)
+{
+	if(num < 0)
+	{
+		snprintf(out, outSize, "0");
+		return;
+	}
+	char raw[32];
+	snprintf(raw, sizeof(raw), "%ld", num);
+	int len = strlen(raw);
+	int outIdx = 0;
+	for(int i = 0; i < len && outIdx < (int)outSize - 2; i++)
+	{
+		if(i > 0 && (len - i) % 3 == 0)
+			out[outIdx++] = '.';
+		out[outIdx++] = raw[i];
+	}
+	out[outIdx] = '\0';
+}
 
 struct UiButton
 {
@@ -182,8 +203,12 @@ void audioCallback(int voice)
 
 Player::~Player()
 {
+	active = nullptr;
 	if(audioRunning)
+	{
 		ASND_StopVoice(AUDIO_VOICE);
+		audioRunning = false;
+	}
 
 	quit = true;
 	if(dec)
@@ -201,14 +226,23 @@ Player::~Player()
 		pfpTexture = nullptr;
 	}
 
-	active = nullptr;
 	if(dec)
+	{
 		decClose(dec);
+		dec = nullptr;
+	}
 	free(ring);
+	ring = nullptr;
 	for(int i = 0; i < AUDIO_BUFFERS; i++)
+	{
 		free(chunk[i]);
+		chunk[i] = nullptr;
+	}
 	if(slotCount > 0)
+	{
 		yuvClose(frames, slotCount);
+		slotCount = 0;
+	}
 }
 
 bool Player::setup(char * err, int errSize)
@@ -249,7 +283,7 @@ bool Player::setup(char * err, int errSize)
 	}
 
 	active = this;
-	if(!thread.start(decodeEntry, this, 128 * 1024, ThreadPriority::Low))
+	if(!thread.start(decodeEntry, this, 128 * 1024, ThreadPriority::Normal))
 	{
 		snprintf(err, errSize, "Could not start decoder thread");
 		return false;
@@ -266,11 +300,12 @@ void * Player::pfpEntry(void * arg)
 
 void Player::pfpLoop()
 {
-	if(!ytMeta || !ytMeta->channelId[0])
+	const char * pfpTarget = (ytMeta && ytMeta->avatarUrl[0]) ? ytMeta->avatarUrl : (ytMeta ? ytMeta->channelId : nullptr);
+	if(!pfpTarget || pfpTarget[0] == '\0')
 		return;
 
 	int w = 0, h = 0;
-	void * tex = ytFetchChannelPfp(ytMeta->channelId, 48, 48, &w, &h);
+	void * tex = ytFetchChannelPfp(pfpTarget, 48, 48, &w, &h);
 	if(!tex)
 		return;
 
@@ -435,7 +470,6 @@ void Player::pushAudio(const DecFrame & f)
 		ringBaseRd = ringWr;
 		ringFresh = false;
 	}
-	lock.unlock();
 
 	uint32_t pos = ringWr & (RING_FRAMES - 1);
 	uint32_t first = RING_FRAMES - pos < n ? RING_FRAMES - pos : n;
@@ -443,6 +477,7 @@ void Player::pushAudio(const DecFrame & f)
 	memcpy(ring, f.pcm + first * 2, (n - first) * 4);
 	BARRIER();
 	ringWr = ringWr + n;
+	lock.unlock();
 }
 
 void Player::fillChunk(int index)
@@ -490,12 +525,12 @@ void Player::tryStart()
 {
 	lock.lock();
 	uint32_t avail = ringWr - ringRd;
-	int need = slotCount < 4 ? slotCount - 1 : 2;
+	int need = slotCount < 4 ? slotCount - 1 : 3;
 	bool ready = !seekPending;
 	double firstPts = fifoCount > 0 ? framePts[fifo[fifoHead]] : 0;
 
 	if(ready && info.hasAudio)
-		ready = avail >= AUDIO_CHUNK * 2 || eof;
+		ready = avail >= AUDIO_CHUNK * 6 || eof;
 	if(ready && info.hasVideo)
 		ready = fifoCount >= need || eof;
 	lock.unlock();
@@ -693,7 +728,7 @@ PlayResult Player::run(char * err, int errSize)
 	pfpReady = false;
 	pfpStop = false;
 
-	if(ytMeta && ytMeta->channelId[0])
+	if(ytMeta && (ytMeta->avatarUrl[0] || ytMeta->channelId[0]))
 		pfpThread.start(pfpEntry, this, 32 * 1024, ThreadPriority::Normal);
 
 	GuiImageData * pfpData = nullptr;
@@ -711,6 +746,16 @@ PlayResult Player::run(char * err, int errSize)
 	chanTxt.setPosition(textX, 39);
 
 	int chanW = chanTxt.getTextWidth();
+	GuiButton chanBtn(chanW > 0 ? chanW + 16 : 0, 24);
+	chanBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	chanBtn.setPosition(textX - 4, 37);
+	chanBtn.setTrigger(&trigA);
+
+	GuiButton pfpBtn(50, 50);
+	pfpBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	pfpBtn.setPosition(14, 10);
+	pfpBtn.setTrigger(&trigA);
+
 	int dateX = textX + chanW + (chanW > 0 ? 14 : 0);
 	GuiText dateTxt((ytMeta && ytMeta->publishedText[0]) ? ytMeta->publishedText : "", 14, (PixelColor){160, 165, 180, 255});
 	dateTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
@@ -774,8 +819,10 @@ PlayResult Player::run(char * err, int errSize)
 	GuiImageData iconForward(icon_forward_png);
 	GuiImageData iconVolDown(icon_vol_down_png);
 	GuiImageData iconVolUp(icon_vol_up_png);
+	GuiImageData iconMenu(icon_menu_png);
 
 	UiButton stopBtn(&btnSmall, &btnSmallOver, &iconStop, -250, &trigA);
+	UiButton menuBtn(&btnSmall, &btnSmallOver, &iconMenu, -320, &trigA);
 	UiButton backBtn(&btnSmall, &btnSmallOver, &iconRewind, -80, &trigA);
 	UiButton playBtn(&btnBig, &btnBigOver, &iconPause, 0, &trigA);
 	UiButton fwdBtn(&btnSmall, &btnSmallOver, &iconForward, 80, &trigA);
@@ -793,7 +840,12 @@ PlayResult Player::run(char * err, int errSize)
 		ui.append(&nameTxt);
 		if(ytMeta)
 		{
-			if(ytMeta->author[0]) ui.append(&chanTxt);
+			if(ytMeta->author[0])
+			{
+				ui.append(&chanTxt);
+				ui.append(&chanBtn);
+				ui.append(&pfpBtn);
+			}
 			if(ytMeta->publishedText[0]) ui.append(&dateTxt);
 			if(ytMeta->viewCountText[0]) ui.append(&viewsTxt);
 		}
@@ -813,12 +865,281 @@ PlayResult Player::run(char * err, int errSize)
 	ui.append(&timeTxt);
 	ui.append(&volTxt);
 	ui.append(&stopBtn.button);
+	if(ytMeta) ui.append(&menuBtn.button);
 	ui.append(&backBtn.button);
 	ui.append(&playBtn.button);
 	ui.append(&fwdBtn.button);
 	ui.append(&volDownBtn.button);
 	ui.append(&volUpBtn.button);
 	ui.append(&loadingTxt);
+
+	enum class Overlay { NONE, MENU, INFO, SUGGESTIONS };
+	Overlay overlayState = Overlay::NONE;
+
+	GuiImageData btnOutline(button_png);
+	GuiImageData btnOutlineOver(button_over_png);
+	GuiSound btnSoundOver2(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	const PixelColor btnTextCol = {25, 28, 38, 255};
+	const PixelColor dimCol = {0, 0, 0, 160};
+
+	GuiImage overlayDim(screenWidth, screenHeight, dimCol);
+
+	int menuW = 320, menuH = 246;
+	GuiWindow menuWin(menuW, menuH);
+	menuWin.setPosition((screenWidth - menuW) / 2, (screenHeight - menuH) / 2);
+	menuWin.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiImage menuBg(320, 246, (PixelColor){22, 25, 36, 250});
+	GuiImage menuBorder(320, 3, accent);
+	menuBorder.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiText menuTitleTxt("Video Menu", 20, white);
+	menuTitleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	menuTitleTxt.setPosition(0, 14);
+
+	GuiImage infoOptImg(&btnOutline);
+	infoOptImg.setSize(260, 36);
+	GuiImage infoOptImgOver(&btnOutlineOver);
+	infoOptImgOver.setSize(260, 36);
+	GuiText infoOptTxt("Video Info", 17, btnTextCol);
+	GuiButton infoOptBtn(260, 36);
+	infoOptBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	infoOptBtn.setPosition(0, 48);
+	infoOptBtn.setImage(&infoOptImg);
+	infoOptBtn.setImageOver(&infoOptImgOver);
+	infoOptBtn.setLabel(&infoOptTxt);
+	infoOptBtn.setSoundOver(&btnSoundOver2);
+	infoOptBtn.setTrigger(&trigA);
+	infoOptBtn.setEffectGrow();
+
+	GuiImage suggOptImg(&btnOutline);
+	suggOptImg.setSize(260, 36);
+	GuiImage suggOptImgOver(&btnOutlineOver);
+	suggOptImgOver.setSize(260, 36);
+	GuiText suggOptTxt("Suggestions", 17, btnTextCol);
+	GuiButton suggOptBtn(260, 36);
+	suggOptBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	suggOptBtn.setPosition(0, 92);
+	suggOptBtn.setImage(&suggOptImg);
+	suggOptBtn.setImageOver(&suggOptImgOver);
+	suggOptBtn.setLabel(&suggOptTxt);
+	suggOptBtn.setSoundOver(&btnSoundOver2);
+	suggOptBtn.setTrigger(&trigA);
+	suggOptBtn.setEffectGrow();
+
+	YtCaptionTrackList captionTracks;
+	captionTracks.count = 0;
+	ytGetCaptionTracks(&captionTracks);
+
+	char captionsOptStr[64];
+	if(captionTracks.count == 0)
+		snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: None");
+	else
+		snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: Off");
+	GuiText captionsOptTxt(captionsOptStr, 17, btnTextCol);
+	GuiImage captionsOptImg(&btnOutline);
+	captionsOptImg.setSize(260, 36);
+	GuiImage captionsOptImgOver(&btnOutlineOver);
+	captionsOptImgOver.setSize(260, 36);
+	GuiButton captionsOptBtn(260, 36);
+	captionsOptBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	captionsOptBtn.setPosition(0, 136);
+	captionsOptBtn.setImage(&captionsOptImg);
+	captionsOptBtn.setImageOver(&captionsOptImgOver);
+	captionsOptBtn.setLabel(&captionsOptTxt);
+	captionsOptBtn.setSoundOver(&btnSoundOver2);
+	captionsOptBtn.setTrigger(&trigA);
+	captionsOptBtn.setEffectGrow();
+
+	int selectedCaptionTrack = -1;
+	bool captionsActive = false;
+	std::vector<YtCaptionLine> activeCaptions;
+	std::vector<YtCaptionLine> cachedCaptions[YT_MAX_CAPTION_TRACKS];
+	bool trackCached[YT_MAX_CAPTION_TRACKS] = { false };
+	Thread capThread;
+	struct CapTask
+	{
+		char url[1024];
+		std::vector<YtCaptionLine> lines;
+		volatile bool done = false;
+		volatile bool success = false;
+	} capTask;
+
+	GuiImage menuCloseImg(&btnOutline);
+	menuCloseImg.setSize(140, 34);
+	GuiImage menuCloseImgOver(&btnOutlineOver);
+	menuCloseImgOver.setSize(140, 34);
+	GuiText menuCloseTxt("Close", 18, btnTextCol);
+	GuiButton menuCloseBtn(140, 34);
+	menuCloseBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	menuCloseBtn.setPosition(0, 192);
+	menuCloseBtn.setImage(&menuCloseImg);
+	menuCloseBtn.setImageOver(&menuCloseImgOver);
+	menuCloseBtn.setLabel(&menuCloseTxt);
+	menuCloseBtn.setSoundOver(&btnSoundOver2);
+	menuCloseBtn.setTrigger(&trigA);
+	menuCloseBtn.setEffectGrow();
+
+	menuWin.append(&menuBg);
+	menuWin.append(&menuBorder);
+	menuWin.append(&menuTitleTxt);
+	menuWin.append(&infoOptBtn);
+	menuWin.append(&suggOptBtn);
+	menuWin.append(&captionsOptBtn);
+	menuWin.append(&menuCloseBtn);
+
+	char lastCapLine[256] = "";
+	struct CaptionDisplay
+	{
+		char lines[4][128];
+		uint16_t lineWidths[4];
+		int lineCount = 0;
+		uint16_t maxW = 0;
+		int totalH = 0;
+	} capDisp;
+
+	int infoW = 560, infoH = 400;
+	GuiWindow infoWin(infoW, infoH);
+	infoWin.setPosition((screenWidth - infoW) / 2, (screenHeight - infoH) / 2);
+	infoWin.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiImage infoBg(560, 400, (PixelColor){22, 25, 36, 250});
+	GuiImage infoBorder(560, 3, accent);
+	infoBorder.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiText infoTitleTxt("Video Info", 22, white);
+	infoTitleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	infoTitleTxt.setPosition(0, 12);
+
+	char metaRow1Str[160] = "";
+	GuiText metaRow1Txt(metaRow1Str, 15, white);
+	metaRow1Txt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	metaRow1Txt.setPosition(24, 44);
+	metaRow1Txt.setMaxWidth(512);
+
+	char metaRow2Str[160] = "";
+	GuiText metaRow2Txt(metaRow2Str, 14, (PixelColor){170, 180, 205, 255});
+	metaRow2Txt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	metaRow2Txt.setPosition(24, 68);
+	metaRow2Txt.setMaxWidth(512);
+
+	char votesStr[128] = "Likes: ...   •   Dislikes: ...";
+	GuiText votesTxt(votesStr, 15, (PixelColor){170, 225, 175, 255});
+	votesTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	votesTxt.setPosition(24, 92);
+	votesTxt.setMaxWidth(512);
+
+	GuiImage infoSep(512, 1, (PixelColor){50, 56, 75, 255});
+	infoSep.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	infoSep.setPosition(0, 118);
+
+	GuiText descHeaderTxt("Description:", 14, (PixelColor){145, 155, 175, 255});
+	descHeaderTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	descHeaderTxt.setPosition(24, 126);
+
+	char descBuf[384] = "";
+	GuiText descTxt(descBuf, 14, (PixelColor){215, 220, 230, 255});
+	descTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	descTxt.setPosition(24, 148);
+	descTxt.setWrap(true, 512);
+
+	GuiImage infoCloseImg(&btnOutline);
+	infoCloseImg.setSize(140, 34);
+	GuiImage infoCloseImgOver(&btnOutlineOver);
+	infoCloseImgOver.setSize(140, 34);
+	GuiText infoCloseTxt("Close", 18, btnTextCol);
+	GuiButton infoCloseBtn(140, 34);
+	infoCloseBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::BOTTOM);
+	infoCloseBtn.setPosition(0, -14);
+	infoCloseBtn.setImage(&infoCloseImg);
+	infoCloseBtn.setImageOver(&infoCloseImgOver);
+	infoCloseBtn.setLabel(&infoCloseTxt);
+	infoCloseBtn.setSoundOver(&btnSoundOver2);
+	infoCloseBtn.setTrigger(&trigA);
+	infoCloseBtn.setEffectGrow();
+
+	infoWin.append(&infoBg);
+	infoWin.append(&infoBorder);
+	infoWin.append(&infoTitleTxt);
+	infoWin.append(&metaRow1Txt);
+	infoWin.append(&metaRow2Txt);
+	infoWin.append(&votesTxt);
+	infoWin.append(&infoSep);
+	infoWin.append(&descHeaderTxt);
+	infoWin.append(&descTxt);
+	infoWin.append(&infoCloseBtn);
+
+	bool votesRequested = false;
+	Thread voteThread;
+	struct VoteTask
+	{
+		char videoId[16];
+		YtVoteData vote;
+		char err[128];
+		bool success = false;
+		volatile bool done = false;
+	} voteTask;
+
+	int suggW = 560, suggH = 400;
+	GuiWindow suggWin(suggW, suggH);
+	suggWin.setPosition((screenWidth - suggW) / 2, (screenHeight - suggH) / 2);
+	suggWin.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiImage suggBg(560, 400, (PixelColor){22, 25, 36, 250});
+	GuiImage suggBorder(560, 3, accent);
+	suggBorder.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiText suggTitleTxt("Suggestions", 22, white);
+	suggTitleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	suggTitleTxt.setPosition(0, 14);
+
+	GuiText suggStatusTxt("Loading suggestions...", 16, (PixelColor){180, 185, 200, 255});
+	suggStatusTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	suggStatusTxt.setPosition(0, 52);
+
+	GuiImage suggCloseImg(&btnOutline);
+	suggCloseImg.setSize(140, 34);
+	GuiImage suggCloseImgOver(&btnOutlineOver);
+	suggCloseImgOver.setSize(140, 34);
+	GuiText suggCloseTxt("Close", 18, btnTextCol);
+	GuiButton suggCloseBtn(140, 34);
+	suggCloseBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::BOTTOM);
+	suggCloseBtn.setPosition(0, -14);
+	suggCloseBtn.setImage(&suggCloseImg);
+	suggCloseBtn.setImageOver(&suggCloseImgOver);
+	suggCloseBtn.setLabel(&suggCloseTxt);
+	suggCloseBtn.setSoundOver(&btnSoundOver2);
+	suggCloseBtn.setTrigger(&trigA);
+	suggCloseBtn.setEffectGrow();
+
+	suggWin.append(&suggBg);
+	suggWin.append(&suggBorder);
+	suggWin.append(&suggTitleTxt);
+	suggWin.append(&suggStatusTxt);
+	suggWin.append(&suggCloseBtn);
+
+	const int MAX_SUGGESTIONS = 5;
+	bool suggRequested = false;
+	Thread suggThread;
+	struct SuggestTask
+	{
+		char videoId[16];
+		YtResult results[MAX_SUGGESTIONS];
+		void * textures[MAX_SUGGESTIONS];
+		int widths[MAX_SUGGESTIONS];
+		int heights[MAX_SUGGESTIONS];
+		volatile bool thumbReady[MAX_SUGGESTIONS];
+		char err[128];
+		int count = 0;
+		volatile bool suggestionsReady = false;
+		volatile bool stop = false;
+		volatile bool done = false;
+	} suggTask;
+
+	GuiButton * suggRowBtn[MAX_SUGGESTIONS] = { nullptr };
+	GuiText * suggRowTxt[MAX_SUGGESTIONS] = { nullptr };
+	GuiText * suggSubTxt[MAX_SUGGESTIONS] = { nullptr };
+	GuiImage * suggRowBg[MAX_SUGGESTIONS] = { nullptr };
+	GuiImage * suggRowBgOver[MAX_SUGGESTIONS] = { nullptr };
+	GuiImageData * suggThumbData[MAX_SUGGESTIONS] = { nullptr };
+	GuiImage * suggThumbImg[MAX_SUGGESTIONS] = { nullptr };
+	char suggRowStr[MAX_SUGGESTIONS][192];
+	char suggSubStr[MAX_SUGGESTIONS][192];
+	bool suggRowsBuilt = false;
 
 	OgcVideoDriver * ogcVideo = static_cast<OgcVideoDriver *>(video);
 	float lastX[4] = { -1, -1, -1, -1 };
@@ -859,26 +1180,36 @@ PlayResult Player::run(char * err, int errSize)
 		}
 
 		idle = (pressed || moved) ? 0 : idle + 1;
-		bool uiVisible = !started || !info.hasVideo || paused || idle < UI_HIDE_FRAMES;
+		bool uiVisible = !started || !info.hasVideo || paused || idle < UI_HIDE_FRAMES || overlayState != Overlay::NONE;
 
 		if(pressed & (INPUT_BTN_B | INPUT_BTN_1))
 		{
-			if(opening && task.dec)
-				decAbort(task.dec);
-			else if(dec)
-				decAbort(dec);
-			break;
+			if(overlayState != Overlay::NONE)
+			{
+				overlayState = Overlay::NONE;
+			}
+			else
+			{
+				if(opening && task.dec)
+					decAbort(task.dec);
+				else if(dec)
+					decAbort(dec);
+				break;
+			}
 		}
-		if(pressed & (INPUT_BTN_PLUS | INPUT_BTN_2))
-			togglePause();
-		if(pressed & INPUT_BTN_RIGHT)
-			seekBy(SEEK_STEP);
-		if(pressed & INPUT_BTN_LEFT)
-			seekBy(-SEEK_STEP);
-		if(pressed & INPUT_BTN_UP)
-			changeVolume(VOLUME_STEP);
-		if(pressed & INPUT_BTN_DOWN)
-			changeVolume(-VOLUME_STEP);
+		if(overlayState == Overlay::NONE)
+		{
+			if(pressed & (INPUT_BTN_PLUS | INPUT_BTN_2))
+				togglePause();
+			if(pressed & INPUT_BTN_RIGHT)
+				seekBy(SEEK_STEP);
+			if(pressed & INPUT_BTN_LEFT)
+				seekBy(-SEEK_STEP);
+			if(pressed & INPUT_BTN_UP)
+				changeVolume(VOLUME_STEP);
+			if(pressed & INPUT_BTN_DOWN)
+				changeVolume(-VOLUME_STEP);
+		}
 
 		if(opening)
 		{
@@ -949,26 +1280,364 @@ PlayResult Player::run(char * err, int errSize)
 			for(int i = 3; i >= 0; i--)
 				ui.update(controller[i]);
 
-			if(backBtn.clicked())
-				seekBy(-SEEK_STEP);
-			if(playBtn.clicked())
-				togglePause();
-			if(fwdBtn.clicked())
-				seekBy(SEEK_STEP);
-			if(volDownBtn.clicked())
-				changeVolume(-VOLUME_STEP);
-			if(volUpBtn.clicked())
-				changeVolume(VOLUME_STEP);
-			if(stopBtn.clicked())
+			if(overlayState == Overlay::NONE)
 			{
-				if(opening && task.dec)
-					decAbort(task.dec);
-				else if(dec)
-					decAbort(dec);
-				break;
+				if(backBtn.clicked())
+					seekBy(-SEEK_STEP);
+				if(playBtn.clicked())
+					togglePause();
+				if(fwdBtn.clicked())
+					seekBy(SEEK_STEP);
+				if(volDownBtn.clicked())
+					changeVolume(-VOLUME_STEP);
+				if(volUpBtn.clicked())
+					changeVolume(VOLUME_STEP);
+				if(stopBtn.clicked())
+				{
+					if(opening && task.dec)
+						decAbort(task.dec);
+					else if(dec)
+						decAbort(dec);
+					break;
+				}
+
+				if(ytMeta && ytMeta->author[0] && (chanBtn.getState() == STATE::CLICKED || pfpBtn.getState() == STATE::CLICKED))
+				{
+					chanBtn.resetState();
+					pfpBtn.resetState();
+					SetNextChannel(ytMeta->channelId[0] ? ytMeta->channelId : ytMeta->author, ytMeta->author, ytMeta->avatarUrl);
+					if(opening && task.dec)
+						decAbort(task.dec);
+					else if(dec)
+						decAbort(dec);
+					result = PLAY_CHANNEL;
+					break;
+				}
+
+				if(menuBtn.clicked())
+				{
+					overlayState = Overlay::MENU;
+				}
+
+				if(seekBtn.getState() == STATE::CLICKED && scrubChan < 0)
+				{
+					seekBtn.resetState();
+					int ch = seekBtn.getStateChan();
+					if(ch >= 0 && ch < 4 && info.duration > 0)
+						scrubChan = ch;
+				}
+			}
+			else if(overlayState == Overlay::MENU)
+			{
+				for(int i = 3; i >= 0; i--) menuWin.update(controller[i]);
+
+				if(infoOptBtn.getState() == STATE::CLICKED)
+				{
+					infoOptBtn.resetState();
+
+					const char *chan = (ytMeta && ytMeta->author[0]) ? ytMeta->author : "Unknown";
+					char dur[32] = "";
+					if(ytMeta && ytMeta->lengthText[0])
+						snprintf(dur, sizeof(dur), "%s", ytMeta->lengthText);
+					else if(info.duration > 0)
+					{
+						int s = (int)info.duration;
+						int h = s / 3600, m = (s % 3600) / 60, sec = s % 60;
+						if(h > 0) snprintf(dur, sizeof(dur), "%d:%02d:%02d", h, m, sec);
+						else snprintf(dur, sizeof(dur), "%02d:%02d", m, sec);
+					}
+					else
+					{
+						snprintf(dur, sizeof(dur), "Unknown");
+					}
+					snprintf(metaRow1Str, sizeof(metaRow1Str), "Channel: %s   •   Duration: %s", chan, dur);
+					metaRow1Txt.setText(metaRow1Str);
+
+					const char *views = (ytMeta && ytMeta->viewCountText[0]) ? ytMeta->viewCountText : "N/A";
+					const char *pub = (ytMeta && ytMeta->publishedText[0]) ? ytMeta->publishedText : "N/A";
+					snprintf(metaRow2Str, sizeof(metaRow2Str), "Views: %s   •   Uploaded: %s", views, pub);
+					metaRow2Txt.setText(metaRow2Str);
+
+					const char *rawDesc = (ytMeta && ytMeta->description[0]) ? ytMeta->description : nullptr;
+					if(rawDesc && rawDesc[0] != '\0')
+					{
+						int dIdx = 0;
+						bool prevSpace = false;
+						for(int i = 0; rawDesc[i] != '\0' && dIdx < (int)sizeof(descBuf) - 5; i++)
+						{
+							char ch = rawDesc[i];
+							if(ch == '\r') continue;
+							if(ch == '\n' || ch == '\t') ch = ' ';
+							if(ch == ' ')
+							{
+								if(prevSpace) continue;
+								prevSpace = true;
+							}
+							else
+							{
+								prevSpace = false;
+							}
+							descBuf[dIdx++] = ch;
+						}
+						if(strlen(rawDesc) > (size_t)dIdx)
+						{
+							descBuf[dIdx++] = '.';
+							descBuf[dIdx++] = '.';
+							descBuf[dIdx++] = '.';
+						}
+						descBuf[dIdx] = '\0';
+					}
+					else
+					{
+						snprintf(descBuf, sizeof(descBuf), "No description available.");
+					}
+					descTxt.setText(descBuf);
+
+					if(!votesRequested)
+					{
+						votesRequested = true;
+						votesTxt.setText("Likes: ...   •   Dislikes: ...");
+						snprintf(voteTask.videoId, sizeof(voteTask.videoId), "%s", ytMeta ? ytMeta->videoId : "");
+						voteTask.err[0] = '\0';
+						voteTask.success = false;
+						voteTask.done = false;
+						voteThread.start([](void * arg) -> void * {
+							VoteTask * t = static_cast<VoteTask *>(arg);
+							t->success = ytFetchVoteData(t->videoId, &t->vote, t->err, sizeof(t->err));
+							t->done = true;
+							return nullptr;
+						}, &voteTask, 32 * 1024, ThreadPriority::Normal);
+					}
+					overlayState = Overlay::INFO;
+				}
+				else if(suggOptBtn.getState() == STATE::CLICKED)
+				{
+					suggOptBtn.resetState();
+					if(!suggRequested)
+					{
+						suggRequested = true;
+						snprintf(suggTask.videoId, sizeof(suggTask.videoId), "%s", ytMeta ? ytMeta->videoId : "");
+						suggTask.err[0] = '\0';
+						suggTask.count = 0;
+						suggTask.suggestionsReady = false;
+						suggTask.stop = false;
+						suggTask.done = false;
+						for(int i = 0; i < MAX_SUGGESTIONS; i++)
+						{
+							suggTask.textures[i] = nullptr;
+							suggTask.thumbReady[i] = false;
+						}
+						suggThread.start([](void * arg) -> void * {
+							SuggestTask * t = static_cast<SuggestTask *>(arg);
+							t->count = ytGetSuggestions(t->videoId, t->results, MAX_SUGGESTIONS, t->err, sizeof(t->err));
+							t->suggestionsReady = true;
+							for(int i = 0; i < t->count && !t->stop; i++)
+							{
+								int w = 0, h = 0;
+								void * tex = ytFetchThumbnail(t->results[i].videoId, 72, 44, &w, &h);
+								if(t->stop)
+								{
+									if(tex) platform->getVideo()->getImageRenderer()->destroyTexture(tex);
+									break;
+								}
+								if(tex)
+								{
+									t->textures[i] = tex;
+									t->widths[i] = w;
+									t->heights[i] = h;
+									t->thumbReady[i] = true;
+								}
+							}
+							t->done = true;
+							return nullptr;
+						}, &suggTask, 64 * 1024, ThreadPriority::Normal);
+					}
+					overlayState = Overlay::SUGGESTIONS;
+				}
+				else if(captionsOptBtn.getState() == STATE::CLICKED)
+				{
+					captionsOptBtn.resetState();
+					if(captionTracks.count > 0)
+					{
+						selectedCaptionTrack++;
+						if(selectedCaptionTrack >= captionTracks.count)
+							selectedCaptionTrack = -1;
+
+						if(selectedCaptionTrack < 0)
+						{
+							captionsActive = false;
+							activeCaptions.clear();
+							snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: Off");
+							captionsOptTxt.setText(captionsOptStr);
+						}
+						else
+						{
+							captionsActive = true;
+							snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: %s", captionTracks.tracks[selectedCaptionTrack].name);
+							captionsOptTxt.setText(captionsOptStr);
+
+							if(trackCached[selectedCaptionTrack])
+							{
+								activeCaptions = cachedCaptions[selectedCaptionTrack];
+							}
+							else
+							{
+								if(capThread.isRunning())
+									capThread.join();
+								snprintf(capTask.url, sizeof(capTask.url), "%s", captionTracks.tracks[selectedCaptionTrack].baseUrl);
+								capTask.lines.clear();
+								capTask.done = false;
+								capTask.success = false;
+								capThread.start([](void * arg) -> void * {
+									CapTask * t = static_cast<CapTask *>(arg);
+									t->success = ytFetchCaptions(t->url, t->lines);
+									t->done = true;
+									return nullptr;
+								}, &capTask, 64 * 1024, ThreadPriority::Normal);
+							}
+						}
+					}
+				}
+				else if(menuCloseBtn.getState() == STATE::CLICKED)
+				{
+					menuCloseBtn.resetState();
+					overlayState = Overlay::NONE;
+				}
+			}
+			else if(overlayState == Overlay::INFO)
+			{
+				for(int i = 3; i >= 0; i--) infoWin.update(controller[i]);
+
+				if(votesRequested && voteTask.done)
+				{
+					if(voteThread.isRunning())
+						voteThread.join();
+					if(voteTask.success)
+					{
+						char likeStr[32], dislikeStr[32];
+						formatVoteNumber(voteTask.vote.likes, likeStr, sizeof(likeStr));
+						formatVoteNumber(voteTask.vote.dislikes, dislikeStr, sizeof(dislikeStr));
+						char text[128];
+						snprintf(text, sizeof(text), "Likes: %s   •   Dislikes: %s", likeStr, dislikeStr);
+						votesTxt.setText(text);
+					}
+					else
+					{
+						votesTxt.setText(voteTask.err[0] ? voteTask.err : "Votes unavailable");
+					}
+					votesRequested = false;
+				}
+
+				if(infoCloseBtn.getState() == STATE::CLICKED)
+				{
+					infoCloseBtn.resetState();
+					overlayState = Overlay::NONE;
+				}
+			}
+			else if(overlayState == Overlay::SUGGESTIONS)
+			{
+				for(int i = 3; i >= 0; i--) suggWin.update(controller[i]);
+
+				if(suggRequested && suggTask.suggestionsReady && !suggRowsBuilt)
+				{
+					suggRowsBuilt = true;
+
+					if(suggTask.count > 0)
+					{
+						suggWin.remove(&suggStatusTxt);
+						for(int i = 0; i < suggTask.count; i++)
+						{
+							snprintf(suggRowStr[i], sizeof(suggRowStr[i]), "%s", suggTask.results[i].title);
+							if(strlen(suggTask.results[i].title) > 42)
+							{
+								suggRowStr[i][39] = '.';
+								suggRowStr[i][40] = '.';
+								suggRowStr[i][41] = '.';
+								suggRowStr[i][42] = '\0';
+							}
+							if(suggTask.results[i].lengthText[0] && suggTask.results[i].author[0])
+								snprintf(suggSubStr[i], sizeof(suggSubStr[i]), "%s • %s", suggTask.results[i].author, suggTask.results[i].lengthText);
+							else if(suggTask.results[i].author[0])
+								snprintf(suggSubStr[i], sizeof(suggSubStr[i]), "%s", suggTask.results[i].author);
+							else
+								suggSubStr[i][0] = '\0';
+
+							suggRowBg[i] = new GuiImage(520, 52, (PixelColor){32, 36, 48, 255});
+							suggRowBgOver[i] = new GuiImage(520, 52, (PixelColor){45, 50, 66, 255});
+							suggRowBtn[i] = new GuiButton(520, 52);
+							suggRowBtn[i]->setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+							suggRowBtn[i]->setPosition(0, 48 + i * 58);
+							suggRowBtn[i]->setImage(suggRowBg[i]);
+							suggRowBtn[i]->setImageOver(suggRowBgOver[i]);
+
+							suggRowTxt[i] = new GuiText(suggRowStr[i], 16, white);
+							suggRowTxt[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+							suggRowTxt[i]->setPosition(86, 7);
+							suggRowTxt[i]->setMaxWidth(420);
+							suggRowBtn[i]->setLabel(suggRowTxt[i], 0);
+
+							if(suggSubStr[i][0])
+							{
+								suggSubTxt[i] = new GuiText(suggSubStr[i], 13, (PixelColor){170, 180, 205, 255});
+								suggSubTxt[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+								suggSubTxt[i]->setPosition(86, 28);
+								suggSubTxt[i]->setMaxWidth(420);
+								suggRowBtn[i]->setLabel(suggSubTxt[i], 1);
+							}
+
+							suggRowBtn[i]->setSoundOver(&btnSoundOver2);
+							suggRowBtn[i]->setTrigger(&trigA);
+							suggRowBtn[i]->setEffectGrow();
+							suggWin.append(suggRowBtn[i]);
+						}
+					}
+					else if(suggTask.done)
+					{
+						suggStatusTxt.setText(suggTask.err[0] ? suggTask.err : "No suggestions found");
+					}
+				}
+
+				if(suggRowsBuilt)
+				{
+					for(int i = 0; i < suggTask.count; i++)
+					{
+						if(suggTask.thumbReady[i] && !suggThumbImg[i] && suggTask.textures[i])
+						{
+							suggThumbData[i] = new GuiImageData(suggTask.textures[i], suggTask.widths[i], suggTask.heights[i], true);
+							suggThumbImg[i] = new GuiImage(suggThumbData[i]);
+							suggThumbImg[i]->setSize(70, 42);
+							suggThumbImg[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+							suggThumbImg[i]->setPosition(8, 0);
+							suggRowBtn[i]->setIcon(suggThumbImg[i]);
+						}
+
+						if(suggRowBtn[i] && suggRowBtn[i]->getState() == STATE::CLICKED)
+						{
+							suggTask.stop = true;
+							if(suggThread.isRunning())
+								suggThread.join();
+							suggRequested = false;
+
+							SetNextVideo(suggTask.results[i]);
+							if(opening && task.dec)
+								decAbort(task.dec);
+							else if(dec)
+								decAbort(dec);
+							result = PLAY_NEXT_VIDEO;
+							overlayState = Overlay::NONE;
+							goto exitPlayLoop;
+						}
+					}
+				}
+
+				if(suggCloseBtn.getState() == STATE::CLICKED)
+				{
+					suggCloseBtn.resetState();
+					overlayState = Overlay::NONE;
+				}
 			}
 
-			if(seekBtn.getState() == STATE::CLICKED && scrubChan < 0)
+			if(seekBtn.getState() == STATE::CLICKED && scrubChan < 0 && overlayState == Overlay::NONE)
 			{
 				seekBtn.resetState();
 				int ch = seekBtn.getStateChan();
@@ -1015,24 +1684,159 @@ PlayResult Player::run(char * err, int errSize)
 		if(started && !paused && info.hasVideo)
 			consumeVideo(clock());
 
+		if(selectedCaptionTrack >= 0 && selectedCaptionTrack < captionTracks.count && !trackCached[selectedCaptionTrack] && capTask.done)
+		{
+			if(capThread.isRunning())
+				capThread.join();
+			if(capTask.success)
+			{
+				cachedCaptions[selectedCaptionTrack] = capTask.lines;
+				trackCached[selectedCaptionTrack] = true;
+				activeCaptions = capTask.lines;
+			}
+		}
+
 		if(finished())
 		{
-			if(failed)
+			if(overlayState != Overlay::NONE)
 			{
-				snprintf(err, errSize, "%s", errorText);
-				result = PLAY_ERROR;
+				if(!paused)
+					togglePause();
 			}
-			break;
+			else
+			{
+				if(failed)
+				{
+					snprintf(err, errSize, "%s", errorText);
+					result = PLAY_ERROR;
+				}
+				break;
+			}
 		}
 
 		if(failed)
 		{
-			snprintf(err, errSize, "%s", errorText[0] ? errorText : "Playback error");
-			result = PLAY_ERROR;
-			break;
+			if(overlayState != Overlay::NONE)
+			{
+				if(!paused)
+					togglePause();
+			}
+			else
+			{
+				snprintf(err, errSize, "%s", errorText[0] ? errorText : "Playback error");
+				result = PLAY_ERROR;
+				break;
+			}
 		}
 
 		double t = scrubChan >= 0 ? scrubTarget : (started ? clock() : displayTime);
+
+		const char * currentCapText = nullptr;
+		if(captionsActive && !activeCaptions.empty() && started)
+		{
+			uint32_t curMs = (uint32_t)(t * 1000.0);
+			for(size_t i = 0; i < activeCaptions.size(); i++)
+			{
+				if(curMs >= activeCaptions[i].startMs && curMs < activeCaptions[i].endMs)
+				{
+					currentCapText = activeCaptions[i].text;
+					break;
+				}
+			}
+		}
+
+		if(currentCapText)
+		{
+			if(strcmp(lastCapLine, currentCapText) != 0)
+			{
+				snprintf(lastCapLine, sizeof(lastCapLine), "%s", currentCapText);
+				capDisp.lineCount = 0;
+				capDisp.maxW = 0;
+				fontSystem->setPixelSize(18);
+
+				const char * p = lastCapLine;
+				while(*p && capDisp.lineCount < 4)
+				{
+					const char * nextNl = strchr(p, '\n');
+					int rawLen = nextNl ? (int)(nextNl - p) : (int)strlen(p);
+					char rawLine[128];
+					if(rawLen >= (int)sizeof(rawLine)) rawLen = sizeof(rawLine) - 1;
+					memcpy(rawLine, p, rawLen);
+					rawLine[rawLen] = '\0';
+
+					int start = 0;
+					while(rawLine[start] == ' ') start++;
+					int end = rawLen;
+					while(end > start && rawLine[end - 1] == ' ') end--;
+					rawLine[end] = '\0';
+					char * linePtr = rawLine + start;
+
+					if(linePtr[0] != '\0')
+					{
+						if(fontSystem->getWidth(linePtr) <= 520)
+						{
+							snprintf(capDisp.lines[capDisp.lineCount], sizeof(capDisp.lines[capDisp.lineCount]), "%s", linePtr);
+							capDisp.lineWidths[capDisp.lineCount] = fontSystem->getWidth(capDisp.lines[capDisp.lineCount]);
+							if(capDisp.lineWidths[capDisp.lineCount] > capDisp.maxW)
+								capDisp.maxW = capDisp.lineWidths[capDisp.lineCount];
+							capDisp.lineCount++;
+						}
+						else
+						{
+							char wordsBuf[128];
+							snprintf(wordsBuf, sizeof(wordsBuf), "%s", linePtr);
+							char * tok = strtok(wordsBuf, " ");
+							char curLine[128] = "";
+							while(tok && capDisp.lineCount < 4)
+							{
+								char testLine[128];
+								if(curLine[0] == '\0')
+									snprintf(testLine, sizeof(testLine), "%s", tok);
+								else
+									snprintf(testLine, sizeof(testLine), "%s %s", curLine, tok);
+
+								if(fontSystem->getWidth(testLine) <= 520)
+								{
+									snprintf(curLine, sizeof(curLine), "%s", testLine);
+								}
+								else
+								{
+									if(curLine[0] != '\0')
+									{
+										snprintf(capDisp.lines[capDisp.lineCount], sizeof(capDisp.lines[capDisp.lineCount]), "%s", curLine);
+										capDisp.lineWidths[capDisp.lineCount] = fontSystem->getWidth(capDisp.lines[capDisp.lineCount]);
+										if(capDisp.lineWidths[capDisp.lineCount] > capDisp.maxW)
+											capDisp.maxW = capDisp.lineWidths[capDisp.lineCount];
+										capDisp.lineCount++;
+									}
+									snprintf(curLine, sizeof(curLine), "%s", tok);
+								}
+								tok = strtok(nullptr, " ");
+							}
+							if(curLine[0] != '\0' && capDisp.lineCount < 4)
+							{
+								snprintf(capDisp.lines[capDisp.lineCount], sizeof(capDisp.lines[capDisp.lineCount]), "%s", curLine);
+								capDisp.lineWidths[capDisp.lineCount] = fontSystem->getWidth(capDisp.lines[capDisp.lineCount]);
+								if(capDisp.lineWidths[capDisp.lineCount] > capDisp.maxW)
+									capDisp.maxW = capDisp.lineWidths[capDisp.lineCount];
+								capDisp.lineCount++;
+							}
+						}
+					}
+
+					if(!nextNl) break;
+					p = nextNl + 1;
+				}
+
+				capDisp.totalH = capDisp.lineCount > 0 ? (capDisp.lineCount * 22 + 8) : 0;
+			}
+		}
+		else if(lastCapLine[0] != '\0')
+		{
+			lastCapLine[0] = '\0';
+			capDisp.lineCount = 0;
+		}
+
 		int fillW = info.duration > 0 ? 1 + (int)((trackWidth - 1) * (t > info.duration ? 1 : (t < 0 ? 0 : t / info.duration))) : 1;
 		trackFill.setSize(fillW, 8);
 		knob.setPosition(TRACK_MARGIN - 6 + fillW, -115);
@@ -1074,13 +1878,49 @@ PlayResult Player::run(char * err, int errSize)
 			}
 		}
 
+		if(captionsActive && capDisp.lineCount > 0)
+		{
+			int boxW = capDisp.maxW + 20;
+			if(boxW < 60) boxW = 60;
+			int boxH = capDisp.totalH;
+			int boxX = (screenWidth - boxW) / 2;
+			int bottomY = uiVisible ? (screenHeight - 145) : (screenHeight - 45);
+			int boxY = bottomY - boxH;
+
+			platform->getVideo()->getImageRenderer()->drawRectangle(boxX, boxY, boxW, boxH, (PixelColor){0, 0, 0, 180});
+
+			fontSystem->setPixelSize(18);
+			for(int i = 0; i < capDisp.lineCount; i++)
+			{
+				int lineY = boxY + 4 + i * 22;
+				fontSystem->drawText(screenWidth / 2, lineY, capDisp.lines[i], white, GUI_TEXT_JUSTIFY_CENTER | GUI_TEXT_ALIGN_TOP);
+			}
+		}
+
 		if(uiVisible)
 		{
 			ui.draw();
+
+			if(overlayState != Overlay::NONE)
+			{
+				overlayDim.draw();
+				if(overlayState == Overlay::MENU) menuWin.draw();
+				else if(overlayState == Overlay::INFO) infoWin.draw();
+				else if(overlayState == Overlay::SUGGESTIONS) suggWin.draw();
+			}
+
 			DrawPointers();
 		}
 
 		video->render();
+	}
+
+exitPlayLoop:
+	active = nullptr;
+	if(audioRunning)
+	{
+		ASND_StopVoice(AUDIO_VOICE);
+		audioRunning = false;
 	}
 
 	if(opening)
@@ -1098,6 +1938,40 @@ PlayResult Player::run(char * err, int errSize)
 	pfpStop = true;
 	if(pfpThread.isRunning())
 		pfpThread.join();
+
+	if(voteThread.isRunning())
+		voteThread.join();
+
+	suggTask.stop = true;
+	if(suggThread.isRunning())
+		suggThread.join();
+
+	if(capThread.isRunning())
+		capThread.join();
+
+	suggWin.removeAll();
+	menuWin.removeAll();
+	infoWin.removeAll();
+
+	for(int i = 0; i < MAX_SUGGESTIONS; i++)
+	{
+		delete suggRowBtn[i];
+		delete suggRowTxt[i];
+		delete suggSubTxt[i];
+		delete suggRowBg[i];
+		delete suggRowBgOver[i];
+		delete suggThumbImg[i];
+		if(suggThumbData[i])
+		{
+			delete suggThumbData[i];
+			suggTask.textures[i] = nullptr;
+		}
+		if(suggTask.textures[i])
+		{
+			platform->getVideo()->getImageRenderer()->destroyTexture(suggTask.textures[i]);
+			suggTask.textures[i] = nullptr;
+		}
+	}
 
 	if(pfpTexture)
 	{
@@ -1123,4 +1997,50 @@ PlayResult PlayFile(const char * path, char * err, int errSize, const char * cus
 {
 	Player player(path, customTitle, ytMeta);
 	return player.run(err, errSize);
+}
+
+static char sNextChannelId[64] = "";
+static char sNextChannelAuthor[128] = "";
+static char sNextChannelAvatar[256] = "";
+
+void SetNextChannel(const char * channelId, const char * author, const char * avatarUrl)
+{
+	snprintf(sNextChannelId, sizeof(sNextChannelId), "%s", channelId ? channelId : "");
+	snprintf(sNextChannelAuthor, sizeof(sNextChannelAuthor), "%s", author ? author : "");
+	snprintf(sNextChannelAvatar, sizeof(sNextChannelAvatar), "%s", avatarUrl ? avatarUrl : "");
+}
+
+bool GetNextChannel(char * channelIdOut, int channelIdSize, char * authorOut, int authorSize, char * avatarUrlOut, int avatarUrlSize)
+{
+	if(sNextChannelId[0] == '\0' && sNextChannelAuthor[0] == '\0')
+		return false;
+	if(channelIdOut && channelIdSize > 0)
+		snprintf(channelIdOut, channelIdSize, "%s", sNextChannelId);
+	if(authorOut && authorSize > 0)
+		snprintf(authorOut, authorSize, "%s", sNextChannelAuthor);
+	if(avatarUrlOut && avatarUrlSize > 0)
+		snprintf(avatarUrlOut, avatarUrlSize, "%s", sNextChannelAvatar);
+	sNextChannelId[0] = '\0';
+	sNextChannelAuthor[0] = '\0';
+	sNextChannelAvatar[0] = '\0';
+	return true;
+}
+
+static YtResult sNextVideo;
+static bool sHasNextVideo = false;
+
+void SetNextVideo(const YtResult & video)
+{
+	sNextVideo = video;
+	sHasNextVideo = true;
+}
+
+bool GetNextVideo(YtResult * videoOut)
+{
+	if(!sHasNextVideo)
+		return false;
+	if(videoOut)
+		*videoOut = sNextVideo;
+	sHasNextVideo = false;
+	return true;
 }

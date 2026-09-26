@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <vector>
+#include <memory>
 
 #include "libgui/Gui.h"
 #include "drivers/Platform.h"
@@ -217,13 +218,7 @@ bool RunWithLoadingScreen(const char * title, const char * msg, volatile bool & 
 	return !platform->shouldExit();
 }
 
-static void ShowLoadingScreen(const char * title, const char * msg)
-{
-	volatile bool d = true;
-	RunWithLoadingScreen(title, msg, d);
-}
-
-static bool EnterUrlPrompt(char * url, int urlSize)
+static bool EnterUrlPrompt(char * url, int urlSize, const char * promptTitle = "Enter Media URL")
 {
 	static const char * const kbRow0 = "1234567890";
 	static const char * const kbRow1 = "qwertyuiop";
@@ -247,7 +242,7 @@ static bool EnterUrlPrompt(char * url, int urlSize)
 	GuiImage border(580, 3, (PixelColor){0, 120, 215, 255});
 	border.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
 
-	GuiText titleTxt("Enter Media URL", 24, white);
+	GuiText titleTxt(promptTitle, 24, white);
 	titleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
 	titleTxt.setPosition(0, 18);
 
@@ -519,23 +514,23 @@ static int ShowOtherMenuPrompt()
 	GuiTrigger trigA;
 	trigA.setPrimaryTrigger();
 
-	GuiImage bg(460, 305, (PixelColor){22, 25, 36, 250});
+	GuiImage bg(460, 340, (PixelColor){22, 25, 36, 250});
 	GuiImage border(460, 3, (PixelColor){0, 120, 215, 255});
 	border.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
 
 	GuiText titleTxt("Other / Settings", 24, (PixelColor){255, 255, 255, 255});
 	titleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
-	titleTxt.setPosition(0, 18);
+	titleTxt.setPosition(0, 16);
 
 	const PixelColor btnText = {25, 28, 38, 255};
 	GuiImage filesImg(&btnOutline);
-	filesImg.setSize(290, 44);
+	filesImg.setSize(290, 40);
 	GuiImage filesImgOver(&btnOutlineOver);
-	filesImgOver.setSize(290, 44);
+	filesImgOver.setSize(290, 40);
 	GuiText filesTxt("Local Storage (SD / USB)", 18, btnText);
-	GuiButton filesBtn(290, 44);
+	GuiButton filesBtn(290, 40);
 	filesBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
-	filesBtn.setPosition(0, 58);
+	filesBtn.setPosition(0, 48);
 	filesBtn.setImage(&filesImg);
 	filesBtn.setImageOver(&filesImgOver);
 	filesBtn.setLabel(&filesTxt);
@@ -544,13 +539,13 @@ static int ShowOtherMenuPrompt()
 	filesBtn.setEffectGrow();
 
 	GuiImage urlImg(&btnOutline);
-	urlImg.setSize(290, 44);
+	urlImg.setSize(290, 40);
 	GuiImage urlImgOver(&btnOutlineOver);
-	urlImgOver.setSize(290, 44);
+	urlImgOver.setSize(290, 40);
 	GuiText urlTxt("Direct Stream URL", 18, btnText);
-	GuiButton urlBtn(290, 44);
+	GuiButton urlBtn(290, 40);
 	urlBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
-	urlBtn.setPosition(0, 110);
+	urlBtn.setPosition(0, 94);
 	urlBtn.setImage(&urlImg);
 	urlBtn.setImageOver(&urlImgOver);
 	urlBtn.setLabel(&urlTxt);
@@ -558,16 +553,32 @@ static int ShowOtherMenuPrompt()
 	urlBtn.setTrigger(&trigA);
 	urlBtn.setEffectGrow();
 
+	GuiImage chanImg(&btnOutline);
+	chanImg.setSize(290, 40);
+	GuiImage chanImgOver(&btnOutlineOver);
+	chanImgOver.setSize(290, 40);
+	GuiText chanTxt("Open Channel (@handle / ID)", 18, btnText);
+	GuiButton chanBtn(290, 40);
+	chanBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	chanBtn.setPosition(0, 140);
+	chanBtn.setImage(&chanImg);
+	chanImgOver.setSize(290, 40);
+	chanBtn.setImageOver(&chanImgOver);
+	chanBtn.setLabel(&chanTxt);
+	chanBtn.setSoundOver(&btnSoundOver);
+	chanBtn.setTrigger(&trigA);
+	chanBtn.setEffectGrow();
+
 	GuiImage clientImg(&btnOutline);
-	clientImg.setSize(290, 44);
+	clientImg.setSize(290, 40);
 	GuiImage clientImgOver(&btnOutlineOver);
-	clientImgOver.setSize(290, 44);
+	clientImgOver.setSize(290, 40);
 	char clientStr[48];
 	snprintf(clientStr, sizeof(clientStr), "YTVideoClient: %s", ytGetClient() == YT_CLIENT_VISIONOS ? "VISIONOS" : "ANDROID");
 	GuiText clientTxt(clientStr, 18, btnText);
-	GuiButton clientBtn(290, 44);
+	GuiButton clientBtn(290, 40);
 	clientBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
-	clientBtn.setPosition(0, 162);
+	clientBtn.setPosition(0, 186);
 	clientBtn.setImage(&clientImg);
 	clientBtn.setImageOver(&clientImgOver);
 	clientBtn.setLabel(&clientTxt);
@@ -576,13 +587,13 @@ static int ShowOtherMenuPrompt()
 	clientBtn.setEffectGrow();
 
 	GuiImage cancelImg(&btnOutline);
-	cancelImg.setSize(140, 40);
+	cancelImg.setSize(140, 38);
 	GuiImage cancelImgOver(&btnOutlineOver);
-	cancelImgOver.setSize(140, 40);
+	cancelImgOver.setSize(140, 38);
 	GuiText cancelTxt("Close", 19, btnText);
-	GuiButton cancelBtn(140, 40);
+	GuiButton cancelBtn(140, 38);
 	cancelBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
-	cancelBtn.setPosition(0, 230);
+	cancelBtn.setPosition(0, 246);
 	cancelBtn.setImage(&cancelImg);
 	cancelBtn.setImageOver(&cancelImgOver);
 	cancelBtn.setLabel(&cancelTxt);
@@ -595,6 +606,7 @@ static int ShowOtherMenuPrompt()
 	otherWin.append(&titleTxt);
 	otherWin.append(&filesBtn);
 	otherWin.append(&urlBtn);
+	otherWin.append(&chanBtn);
 	otherWin.append(&clientBtn);
 	otherWin.append(&cancelBtn);
 
@@ -611,6 +623,8 @@ static int ShowOtherMenuPrompt()
 			choice = 1;
 		else if(urlBtn.getState() == STATE::CLICKED)
 			choice = 2;
+		else if(chanBtn.getState() == STATE::CLICKED)
+			choice = 3;
 		else if(clientBtn.getState() == STATE::CLICKED)
 		{
 			clientBtn.resetState();
@@ -829,12 +843,12 @@ struct ThumbTask
 {
 	Thread thread;
 	Mutex lock;
-	YtResult results[6];
+	YtResult results[YT_MAX_RESULTS];
 	int count = 0;
-	void * textures[6] = { nullptr };
-	int widths[6] = { 0 };
-	int heights[6] = { 0 };
-	volatile bool ready[6] = { false };
+	void * textures[YT_MAX_RESULTS] = { nullptr };
+	int widths[YT_MAX_RESULTS] = { 0 };
+	int heights[YT_MAX_RESULTS] = { 0 };
+	volatile bool ready[YT_MAX_RESULTS] = { false };
 	volatile bool stop = false;
 };
 
@@ -846,7 +860,9 @@ static void * thumbThreadEntry(void * arg)
 	for(int i = 0; i < t->count && !t->stop; i++)
 	{
 		int w = 0, h = 0;
-		void * tex = ytFetchThumbnail(t->results[i].videoId, 144, 81, &w, &h);
+		void * tex = t->results[i].isChannel
+			? ytFetchImage(t->results[i].avatarUrl, 88, 88, &w, &h)
+			: ytFetchThumbnail(t->results[i].videoId, 144, 81, &w, &h);
 		if(t->stop)
 		{
 			if(tex) platform->getVideo()->getImageRenderer()->destroyTexture(tex);
@@ -872,7 +888,7 @@ static void startAsyncThumbnails(const YtResult * results, int count)
 		gThumbTask->stop = true;
 		if(gThumbTask->thread.isRunning())
 			gThumbTask->thread.join();
-		for(int i = 0; i < 6; i++)
+		for(int i = 0; i < YT_MAX_RESULTS; i++)
 		{
 			if(gThumbTask->textures[i])
 			{
@@ -888,18 +904,915 @@ static void startAsyncThumbnails(const YtResult * results, int count)
 		return;
 
 	gThumbTask = new ThumbTask();
-	gThumbTask->count = count > 6 ? 6 : count;
+	gThumbTask->count = count > YT_MAX_RESULTS ? YT_MAX_RESULTS : count;
 	for(int i = 0; i < gThumbTask->count; i++)
 		gThumbTask->results[i] = results[i];
 
 	gThumbTask->thread.start(thumbThreadEntry, gThumbTask, 64 * 1024, ThreadPriority::Normal);
 }
 
+void MenuChannel(const char * channelIdOrHandle, const char * channelTitle, const char * avatarUrl)
+{
+	if(!channelIdOrHandle || channelIdOrHandle[0] == '\0')
+		return;
+
+	const PixelColor white = {255, 255, 255, 255};
+	const PixelColor grey = {170, 175, 190, 255};
+	const PixelColor subText = {135, 145, 170, 255};
+	const PixelColor cardNormal = {26, 30, 42, 255};
+	const PixelColor cardOver = {44, 52, 74, 255};
+	const PixelColor tabActive = {0, 120, 215, 255};
+	const PixelColor btnText = {25, 28, 38, 255};
+
+	int sw = platform->getVideo()->getScreenWidth();
+	int sh = platform->getVideo()->getScreenHeight();
+
+	GuiImageData btnOutline(button_png);
+	GuiImageData btnOutlineOver(button_over_png);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiTrigger trigA;
+	trigA.setPrimaryTrigger();
+
+	char currentChannel[128];
+	snprintf(currentChannel, sizeof(currentChannel), "%s", channelIdOrHandle);
+
+	YtChannelTab currentTab = YT_CHAN_TAB_VIDEOS;
+	YtChannelFilter currentFilter = YT_CHAN_FILTER_NEWEST;
+	std::unique_ptr<YtChannelDetails> detailsPtr(new YtChannelDetails());
+	YtChannelDetails & details = *detailsPtr;
+	memset(&details, 0, sizeof(details));
+	if(channelTitle && channelTitle[0])
+		snprintf(details.title, sizeof(details.title), "%s", channelTitle);
+	if(avatarUrl && avatarUrl[0])
+		snprintf(details.avatarUrl, sizeof(details.avatarUrl), "%s", avatarUrl);
+
+	std::unique_ptr<YtChannelItem[]> itemsPtr(new YtChannelItem[30]);
+	YtChannelItem * items = itemsPtr.get();
+	int itemCount = 0;
+	int page = 0;
+	int aboutScroll = 0;
+	const int CARDS_PER_PAGE = 3;
+
+	struct HeaderTask
+	{
+		Thread thread;
+		Mutex lock;
+		char avatarUrl[256];
+		char bannerUrl[256];
+		void * avatarTex = nullptr;
+		int avatarW = 0, avatarH = 0;
+		void * bannerTex = nullptr;
+		int bannerW = 0, bannerH = 0;
+		volatile bool readyAvatar = false;
+		volatile bool readyBanner = false;
+		volatile bool stop = false;
+	};
+
+	HeaderTask * headerTask = nullptr;
+	GuiImageData * avatarData = nullptr;
+	GuiImage * avatarImg = nullptr;
+	GuiImageData * bannerData = nullptr;
+	GuiImage * bannerImg = nullptr;
+
+	auto stopHeaderTask = [&]() {
+		if(headerTask)
+		{
+			headerTask->stop = true;
+			if(headerTask->thread.isRunning())
+				headerTask->thread.join();
+			if(headerTask->avatarTex)
+				platform->getVideo()->getImageRenderer()->destroyTexture(headerTask->avatarTex);
+			if(headerTask->bannerTex)
+				platform->getVideo()->getImageRenderer()->destroyTexture(headerTask->bannerTex);
+			delete headerTask;
+			headerTask = nullptr;
+		}
+	};
+
+	struct ChannelThumbTask
+	{
+		Thread thread;
+		Mutex lock;
+		YtChannelItem items[30];
+		int count = 0;
+		void * textures[30] = { nullptr };
+		int widths[30] = { 0 };
+		int heights[30] = { 0 };
+		volatile bool ready[30] = { false };
+		volatile bool stop = false;
+	};
+
+	ChannelThumbTask * thumbTask = nullptr;
+	GuiImageData * thumbData[30] = { nullptr };
+	GuiImage * thumbImg[30] = { nullptr };
+
+	auto clearThumbnails = [&]() {
+		if(thumbTask)
+		{
+			thumbTask->stop = true;
+			if(thumbTask->thread.isRunning())
+				thumbTask->thread.join();
+			for(int i = 0; i < 30; i++)
+			{
+				if(thumbTask->textures[i])
+				{
+					platform->getVideo()->getImageRenderer()->destroyTexture(thumbTask->textures[i]);
+					thumbTask->textures[i] = nullptr;
+				}
+			}
+			delete thumbTask;
+			thumbTask = nullptr;
+		}
+		for(int i = 0; i < 30; i++)
+		{
+			delete thumbImg[i];
+			thumbImg[i] = nullptr;
+			delete thumbData[i];
+			thumbData[i] = nullptr;
+		}
+	};
+
+	auto loadBrowse = [&]() -> bool {
+		clearThumbnails();
+
+		struct BrowseTask
+		{
+			char channel[128];
+			YtChannelTab tab;
+			YtChannelFilter filter;
+			YtChannelDetails * d;
+			YtChannelItem * itms;
+			int maxItms;
+			int count = 0;
+			char error[128];
+			bool success = false;
+			volatile bool done = false;
+		} bTask;
+
+		snprintf(bTask.channel, sizeof(bTask.channel), "%s", currentChannel);
+		bTask.tab = currentTab;
+		bTask.filter = currentFilter;
+		bTask.d = &details;
+		bTask.itms = items;
+		bTask.maxItms = 30;
+		bTask.error[0] = '\0';
+		bTask.done = false;
+
+		Thread bThread;
+		bThread.start([](void * arg) -> void * {
+			BrowseTask * t = static_cast<BrowseTask *>(arg);
+			t->success = ytChannelBrowse(t->channel, t->d, t->tab, t->filter, t->itms, t->maxItms, &t->count, t->error, sizeof(t->error));
+			t->done = true;
+			return nullptr;
+		}, &bTask, 64 * 1024, ThreadPriority::Normal);
+
+		RunWithLoadingScreen("BrewTube", "Loading channel...", bTask.done);
+		bThread.join();
+
+		if(!bTask.success)
+		{
+			WindowPrompt("Channel Error", bTask.error[0] ? bTask.error : "Could not load channel", "OK", nullptr);
+			return false;
+		}
+
+		itemCount = bTask.count;
+		page = 0;
+		aboutScroll = 0;
+
+		if(itemCount > 0)
+		{
+			thumbTask = new ChannelThumbTask();
+			thumbTask->count = itemCount > 30 ? 30 : itemCount;
+			for(int i = 0; i < thumbTask->count; i++)
+				thumbTask->items[i] = items[i];
+
+			thumbTask->thread.start([](void * arg) -> void * {
+				ChannelThumbTask * t = static_cast<ChannelThumbTask *>(arg);
+				for(int i = 0; i < t->count && !t->stop; i++)
+				{
+					int w = 0, h = 0;
+					void * tex = nullptr;
+					if(t->items[i].id[0] != '\0')
+						tex = ytFetchThumbnail(t->items[i].id, 144, 81, &w, &h);
+					else if(t->items[i].thumbUrl[0] != '\0')
+						tex = ytFetchImage(t->items[i].thumbUrl, 144, 81, &w, &h);
+
+					if(t->stop)
+					{
+						if(tex) platform->getVideo()->getImageRenderer()->destroyTexture(tex);
+						break;
+					}
+					if(tex)
+					{
+						t->lock.lock();
+						t->textures[i] = tex;
+						t->widths[i] = w;
+						t->heights[i] = h;
+						t->ready[i] = true;
+						t->lock.unlock();
+					}
+				}
+				return nullptr;
+			}, thumbTask, 64 * 1024, ThreadPriority::Normal);
+		}
+
+		return true;
+	};
+
+	auto startHeaderLoad = [&]() {
+		stopHeaderTask();
+		if(details.avatarUrl[0] != '\0' || details.bannerUrl[0] != '\0')
+		{
+			headerTask = new HeaderTask();
+			snprintf(headerTask->avatarUrl, sizeof(headerTask->avatarUrl), "%s", details.avatarUrl);
+			snprintf(headerTask->bannerUrl, sizeof(headerTask->bannerUrl), "%s", details.bannerUrl);
+
+			headerTask->thread.start([](void * arg) -> void * {
+				HeaderTask * t = static_cast<HeaderTask *>(arg);
+				if(t->avatarUrl[0] != '\0' && !t->stop)
+				{
+					int w = 0, h = 0;
+					void * tex = ytFetchImage(t->avatarUrl, 56, 56, &w, &h);
+					if(!t->stop && tex)
+					{
+						t->lock.lock();
+						t->avatarTex = tex;
+						t->avatarW = w;
+						t->avatarH = h;
+						t->readyAvatar = true;
+						t->lock.unlock();
+					}
+					else if(tex)
+						platform->getVideo()->getImageRenderer()->destroyTexture(tex);
+				}
+				if(t->bannerUrl[0] != '\0' && !t->stop)
+				{
+					int w = 0, h = 0;
+					void * tex = ytFetchImage(t->bannerUrl, 640, 74, &w, &h);
+					if(!t->stop && tex)
+					{
+						t->lock.lock();
+						t->bannerTex = tex;
+						t->bannerW = w;
+						t->bannerH = h;
+						t->readyBanner = true;
+						t->lock.unlock();
+					}
+					else if(tex)
+						platform->getVideo()->getImageRenderer()->destroyTexture(tex);
+				}
+				return nullptr;
+			}, headerTask, 64 * 1024, ThreadPriority::Normal);
+		}
+	};
+
+	if(!loadBrowse())
+		return;
+	startHeaderLoad();
+
+	bool inChannel = true;
+	while(inChannel && !platform->shouldExit())
+	{
+		GuiWindow channelWin(sw, sh);
+
+		GuiImage headerBg(sw, 74, (PixelColor){14, 16, 24, 255});
+		channelWin.append(&headerBg);
+
+		if(bannerImg)
+			channelWin.append(bannerImg);
+
+		GuiImage bannerTint(sw, 74, (PixelColor){0, 0, 0, 130});
+		if(bannerImg)
+			channelWin.append(&bannerTint);
+
+		GuiImage avatarBox(48, 48, tabActive);
+		avatarBox.setPosition(18, 13);
+		if(avatarImg)
+			channelWin.append(avatarImg);
+		else
+			channelWin.append(&avatarBox);
+
+		GuiText titleTxt(details.title[0] ? details.title : (channelTitle ? channelTitle : currentChannel), 20, white);
+		titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+		titleTxt.setPosition(76, 14);
+		titleTxt.setMaxWidth(sw - 170);
+		channelWin.append(&titleTxt);
+
+		char subStats[160];
+		if(details.handle[0] != '\0' && details.subscriberCount[0] != '\0')
+			snprintf(subStats, sizeof(subStats), "%s   •   %s", details.handle, details.subscriberCount);
+		else if(details.handle[0] != '\0')
+			snprintf(subStats, sizeof(subStats), "%s", details.handle);
+		else if(details.subscriberCount[0] != '\0')
+			snprintf(subStats, sizeof(subStats), "%s", details.subscriberCount);
+		else
+			snprintf(subStats, sizeof(subStats), "%s", currentChannel);
+
+		GuiText handleTxt(subStats, 14, grey);
+		handleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+		handleTxt.setPosition(76, 40);
+		handleTxt.setMaxWidth(sw - 170);
+		channelWin.append(&handleTxt);
+
+		GuiImage backImg(&btnOutline);
+		backImg.setSize(75, 34);
+		GuiImage backImgOver(&btnOutlineOver);
+		backImgOver.setSize(75, 34);
+		GuiText backTxt("Back", 18, btnText);
+		GuiButton backBtn(75, 34);
+		backBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
+		backBtn.setPosition(-16, 12);
+		backBtn.setImage(&backImg);
+		backBtn.setImageOver(&backImgOver);
+		backBtn.setLabel(&backTxt);
+		backBtn.setTrigger(&trigA);
+		backBtn.setSoundOver(&btnSoundOver);
+		backBtn.setEffectGrow();
+		channelWin.append(&backBtn);
+
+		GuiImage headerLine(sw, 2, tabActive);
+		headerLine.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+		headerLine.setPosition(0, 74);
+		channelWin.append(&headerLine);
+
+		const char * tabTitles[5] = { "Videos", "Shorts", "Playlists", "Posts", "About" };
+		std::vector<GuiImage> tabImg;
+		std::vector<GuiImage> tabImgOver;
+		std::vector<GuiText> tabTxt;
+		tabImg.reserve(5);
+		tabImgOver.reserve(5);
+		tabTxt.reserve(5);
+		GuiButton tabBtn[5];
+
+		int tabStartX = (sw - (5 * 84 + 4 * 6)) / 2;
+		for(int t = 0; t < 5; t++)
+		{
+			tabImg.emplace_back(84, 28, t == (int)currentTab ? tabActive : (PixelColor){32, 36, 48, 255});
+			tabImgOver.emplace_back(84, 28, t == (int)currentTab ? tabActive : (PixelColor){50, 58, 80, 255});
+			tabTxt.emplace_back(tabTitles[t], 16, white);
+
+			tabBtn[t].setSize(84, 28);
+			tabBtn[t].setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+			tabBtn[t].setPosition(tabStartX + t * (84 + 6), 80);
+			tabBtn[t].setImage(&tabImg.back());
+			tabBtn[t].setImageOver(&tabImgOver.back());
+			tabBtn[t].setLabel(&tabTxt.back());
+			tabBtn[t].setTrigger(&trigA);
+			tabBtn[t].setSoundOver(&btnSoundOver);
+			tabBtn[t].setEffectGrow();
+			channelWin.append(&tabBtn[t]);
+		}
+
+		const char * filterTitles[3] = { "Latest", "Popular", "Oldest" };
+		std::vector<GuiImage> filterImg;
+		std::vector<GuiImage> filterImgOver;
+		std::vector<GuiText> filterTxt;
+		filterImg.reserve(3);
+		filterImgOver.reserve(3);
+		filterTxt.reserve(3);
+		GuiButton filterBtn[3];
+
+		if(currentTab == YT_CHAN_TAB_VIDEOS)
+		{
+			int filterStartX = (sw - (3 * 72 + 2 * 6)) / 2;
+			for(int f = 0; f < 3; f++)
+			{
+				filterImg.emplace_back(72, 24, f == (int)currentFilter ? tabActive : (PixelColor){38, 44, 58, 255});
+				filterImgOver.emplace_back(72, 24, f == (int)currentFilter ? tabActive : (PixelColor){55, 65, 85, 255});
+				filterTxt.emplace_back(filterTitles[f], 14, white);
+
+				filterBtn[f].setSize(72, 24);
+				filterBtn[f].setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+				filterBtn[f].setPosition(filterStartX + f * (72 + 6), 114);
+				filterBtn[f].setImage(&filterImg.back());
+				filterBtn[f].setImageOver(&filterImgOver.back());
+				filterBtn[f].setLabel(&filterTxt.back());
+				filterBtn[f].setTrigger(&trigA);
+				filterBtn[f].setSoundOver(&btnSoundOver);
+				filterBtn[f].setEffectGrow();
+				channelWin.append(&filterBtn[f]);
+			}
+		}
+
+		int startIdx = page * CARDS_PER_PAGE;
+		int visibleCount = 0;
+		int cardYStart = (currentTab == YT_CHAN_TAB_VIDEOS) ? 144 : 116;
+		int cardH = (currentTab == YT_CHAN_TAB_VIDEOS) ? 86 : 94;
+		int cardGap = 8;
+		const int CARD_W = 590;
+
+		GuiButton * cardBtn[CARDS_PER_PAGE] = { nullptr };
+		GuiImage * cardBg[CARDS_PER_PAGE] = { nullptr };
+		GuiImage * cardBgOver[CARDS_PER_PAGE] = { nullptr };
+		GuiText * cardTitle[CARDS_PER_PAGE] = { nullptr };
+		GuiText * cardMeta[CARDS_PER_PAGE] = { nullptr };
+		char cardTitleStr[CARDS_PER_PAGE][64];
+		char cardMetaStr[CARDS_PER_PAGE][128];
+
+		GuiImage aboutBg(590, 290, cardNormal);
+		char aboutStr[1024];
+		GuiText aboutTxt("", 15, white);
+		char statsStr[256];
+		GuiText statsTxt("", 13, subText);
+		GuiText emptyTxt("No items found in this section", 18, grey);
+
+		if(currentTab == YT_CHAN_TAB_ABOUT)
+		{
+			aboutBg.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+			aboutBg.setPosition(0, 118);
+			channelWin.append(&aboutBg);
+
+			snprintf(aboutStr, sizeof(aboutStr), "%s", details.description[0] ? details.description : "No description provided.");
+			aboutTxt.setText(aboutStr);
+			aboutTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+			aboutTxt.setPosition((sw - 590) / 2 + 16, 134 - aboutScroll);
+			aboutTxt.setWrap(true, 558);
+			channelWin.append(&aboutTxt);
+
+			snprintf(statsStr, sizeof(statsStr), "Channel ID: %s   •   Subscribers: %s   •   Videos: %s", details.channelId[0] ? details.channelId : currentChannel, details.subscriberCount[0] ? details.subscriberCount : "N/A", details.videoCount[0] ? details.videoCount : "N/A");
+			statsTxt.setText(statsStr);
+			statsTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+			statsTxt.setPosition(0, 386);
+			channelWin.append(&statsTxt);
+		}
+		else
+		{
+			if(itemCount == 0)
+			{
+				emptyTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+				emptyTxt.setPosition(0, 30);
+				channelWin.append(&emptyTxt);
+			}
+			else
+			{
+				for(int s = 0; s < CARDS_PER_PAGE; s++)
+				{
+					int idx = startIdx + s;
+					if(idx >= itemCount) break;
+					visibleCount++;
+					int cardY = cardYStart + s * (cardH + cardGap);
+
+					cardBg[s] = new GuiImage(CARD_W, cardH, cardNormal);
+					cardBgOver[s] = new GuiImage(CARD_W, cardH, cardOver);
+
+					cardBtn[s] = new GuiButton(CARD_W, cardH);
+					cardBtn[s]->setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+					cardBtn[s]->setPosition(0, cardY);
+					cardBtn[s]->setImage(cardBg[s]);
+					cardBtn[s]->setImageOver(cardBgOver[s]);
+					cardBtn[s]->setSoundOver(&btnSoundOver);
+					cardBtn[s]->setTrigger(&trigA);
+					if(items[idx].isPlayable)
+						cardBtn[s]->setEffectGrow();
+
+					if(thumbImg[idx])
+					{
+						thumbImg[idx]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+						thumbImg[idx]->setPosition(8, 0);
+						cardBtn[s]->setIcon(thumbImg[idx]);
+					}
+
+					snprintf(cardTitleStr[s], sizeof(cardTitleStr[s]), "%s", items[idx].title);
+					if(strlen(items[idx].title) > 42)
+					{
+						cardTitleStr[s][39] = '.';
+						cardTitleStr[s][40] = '.';
+						cardTitleStr[s][41] = '.';
+						cardTitleStr[s][42] = '\0';
+					}
+					cardTitle[s] = new GuiText(cardTitleStr[s], 17, white);
+					cardTitle[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+					cardTitle[s]->setPosition(148, 12);
+					cardTitle[s]->setMaxWidth(430);
+					cardBtn[s]->setLabel(cardTitle[s], 0);
+
+					if(items[idx].date[0] != '\0' && items[idx].views[0] != '\0' && items[idx].duration[0] != '\0')
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s   •   %s", items[idx].duration, items[idx].views, items[idx].date);
+					else if(items[idx].views[0] != '\0' && items[idx].duration[0] != '\0')
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s", items[idx].duration, items[idx].views);
+					else if(items[idx].duration[0] != '\0')
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s", items[idx].duration);
+					else
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s", items[idx].date);
+
+					cardMeta[s] = new GuiText(cardMetaStr[s], 14, subText);
+					cardMeta[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+					cardMeta[s]->setPosition(148, 38);
+					cardMeta[s]->setMaxWidth(430);
+					cardBtn[s]->setLabel(cardMeta[s], 1);
+
+					channelWin.append(cardBtn[s]);
+				}
+			}
+		}
+
+		int totalPages = (itemCount + CARDS_PER_PAGE - 1) / CARDS_PER_PAGE;
+		GuiImage prevImg(&btnOutline);
+		prevImg.setSize(90, 34);
+		GuiImage prevImgOver(&btnOutlineOver);
+		prevImgOver.setSize(90, 34);
+		GuiText prevTxt("Prev", 18, btnText);
+		GuiButton prevBtn(90, 34);
+		prevBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+		prevBtn.setPosition(-70, 428);
+		prevBtn.setImage(&prevImg);
+		prevBtn.setImageOver(&prevImgOver);
+		prevBtn.setLabel(&prevTxt);
+		prevBtn.setTrigger(&trigA);
+		prevBtn.setSoundOver(&btnSoundOver);
+		prevBtn.setEffectGrow();
+
+		GuiImage nextImg(&btnOutline);
+		nextImg.setSize(90, 34);
+		GuiImage nextImgOver(&btnOutlineOver);
+		nextImgOver.setSize(90, 34);
+		GuiText nextTxt("Next", 18, btnText);
+		GuiButton nextBtn(90, 34);
+		nextBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+		nextBtn.setPosition(70, 428);
+		nextBtn.setImage(&nextImg);
+		nextBtn.setImageOver(&nextImgOver);
+		nextBtn.setLabel(&nextTxt);
+		nextBtn.setTrigger(&trigA);
+		nextBtn.setSoundOver(&btnSoundOver);
+		nextBtn.setEffectGrow();
+
+		char pageStr[32];
+		snprintf(pageStr, sizeof(pageStr), "%d / %d", page + 1, totalPages > 0 ? totalPages : 1);
+		GuiText pageTxt(pageStr, 17, white);
+		pageTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+		pageTxt.setPosition(0, 434);
+
+		if(currentTab != YT_CHAN_TAB_ABOUT && totalPages > 1)
+		{
+			if(page > 0) channelWin.append(&prevBtn);
+			channelWin.append(&pageTxt);
+			if(page + 1 < totalPages) channelWin.append(&nextBtn);
+		}
+
+		mainWindow->appendWithAutoRemove(&channelWin);
+		bool stayInPage = true;
+
+		while(stayInPage && inChannel && !platform->shouldExit())
+		{
+			if(!UpdateGui())
+			{
+				inChannel = false;
+				break;
+			}
+
+			if(headerTask)
+			{
+				headerTask->lock.lock();
+				if(headerTask->readyAvatar && headerTask->avatarTex && !avatarImg)
+				{
+					avatarData = new GuiImageData(headerTask->avatarTex, headerTask->avatarW, headerTask->avatarH);
+					headerTask->avatarTex = nullptr;
+					avatarImg = new GuiImage(avatarData);
+					avatarImg->setSize(48, 48);
+					avatarImg->setPosition(18, 13);
+					stayInPage = false;
+				}
+				if(headerTask->readyBanner && headerTask->bannerTex && !bannerImg)
+				{
+					bannerData = new GuiImageData(headerTask->bannerTex, headerTask->bannerW, headerTask->bannerH);
+					headerTask->bannerTex = nullptr;
+					bannerImg = new GuiImage(bannerData);
+					bannerImg->setSize(sw, 74);
+					bannerImg->setPosition(0, 0);
+					stayInPage = false;
+				}
+				headerTask->lock.unlock();
+			}
+
+			if(thumbTask)
+			{
+				thumbTask->lock.lock();
+				for(int i = 0; i < itemCount; i++)
+				{
+					if(thumbTask->ready[i] && !thumbImg[i] && thumbTask->textures[i])
+					{
+						thumbData[i] = new GuiImageData(thumbTask->textures[i], thumbTask->widths[i], thumbTask->heights[i]);
+						thumbTask->textures[i] = nullptr;
+						thumbImg[i] = new GuiImage(thumbData[i]);
+						thumbImg[i]->setSize(124, 70);
+						thumbImg[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+						thumbImg[i]->setPosition(8, 0);
+
+						for(int s = 0; s < visibleCount; s++)
+						{
+							if(startIdx + s == i && cardBtn[s])
+							{
+								cardBtn[s]->setIcon(thumbImg[i]);
+							}
+						}
+					}
+				}
+				thumbTask->lock.unlock();
+			}
+
+			if(backBtn.getState() == STATE::CLICKED)
+			{
+				backBtn.resetState();
+				inChannel = false;
+				stayInPage = false;
+				break;
+			}
+
+			for(int t = 0; t < 5; t++)
+			{
+				if(tabBtn[t].getState() == STATE::CLICKED)
+				{
+					tabBtn[t].resetState();
+					if(currentTab != (YtChannelTab)t)
+					{
+						currentTab = (YtChannelTab)t;
+						loadBrowse();
+						stayInPage = false;
+						break;
+					}
+				}
+			}
+			if(!stayInPage) break;
+
+			if(currentTab == YT_CHAN_TAB_VIDEOS)
+			{
+				for(int f = 0; f < 3; f++)
+				{
+					if(filterBtn[f].getState() == STATE::CLICKED)
+					{
+						filterBtn[f].resetState();
+						if(currentFilter != (YtChannelFilter)f)
+						{
+							currentFilter = (YtChannelFilter)f;
+							loadBrowse();
+							stayInPage = false;
+							break;
+						}
+					}
+				}
+				if(!stayInPage) break;
+			}
+
+			for(int s = 0; s < visibleCount; s++)
+			{
+				if(cardBtn[s] && cardBtn[s]->getState() == STATE::CLICKED)
+				{
+					cardBtn[s]->resetState();
+					int chosen = startIdx + s;
+					if(items[chosen].isPlayable)
+					{
+						if(thumbTask)
+						{
+							thumbTask->stop = true;
+							if(thumbTask->thread.isRunning())
+								thumbTask->thread.join();
+						}
+						if(headerTask)
+						{
+							headerTask->stop = true;
+							if(headerTask->thread.isRunning())
+								headerTask->thread.join();
+						}
+
+						struct ResolveTask
+						{
+							char videoId[32];
+							char streamUrl[8192];
+							char error[128];
+							YtResult * result;
+							bool success = false;
+							volatile bool done = false;
+						};
+						std::unique_ptr<ResolveTask> rTask(new ResolveTask());
+
+						snprintf(rTask->videoId, sizeof(rTask->videoId), "%s", items[chosen].id);
+						rTask->streamUrl[0] = '\0';
+						rTask->error[0] = '\0';
+						rTask->done = false;
+
+						YtResult ytMeta = {};
+						snprintf(ytMeta.videoId, sizeof(ytMeta.videoId), "%s", items[chosen].id);
+						snprintf(ytMeta.channelId, sizeof(ytMeta.channelId), "%s", details.channelId);
+						snprintf(ytMeta.title, sizeof(ytMeta.title), "%s", items[chosen].title);
+						snprintf(ytMeta.author, sizeof(ytMeta.author), "%s", details.title[0] ? details.title : currentChannel);
+						snprintf(ytMeta.lengthText, sizeof(ytMeta.lengthText), "%s", items[chosen].duration);
+						snprintf(ytMeta.viewCountText, sizeof(ytMeta.viewCountText), "%s", items[chosen].views);
+						snprintf(ytMeta.publishedText, sizeof(ytMeta.publishedText), "%s", items[chosen].date);
+						snprintf(ytMeta.avatarUrl, sizeof(ytMeta.avatarUrl), "%s", details.avatarUrl);
+						rTask->result = &ytMeta;
+
+						Thread resolveThread;
+						resolveThread.start([](void * arg) -> void * {
+							ResolveTask * t = static_cast<ResolveTask *>(arg);
+							t->success = ytResolveStream(t->videoId, t->streamUrl, sizeof(t->streamUrl), t->error, sizeof(t->error), t->result);
+							t->done = true;
+							return nullptr;
+						}, rTask.get(), 64 * 1024, ThreadPriority::Normal);
+
+						RunWithLoadingScreen("BrewTube", "Resolving video stream", rTask->done);
+						resolveThread.join();
+
+						if(rTask->success)
+						{
+							HaltDeviceCheckingThread();
+							mainWindow->setState(STATE::DISABLED);
+							PlayResult playRes = PlayFile(rTask->streamUrl, rTask->error, sizeof(rTask->error), ytMeta.title, &ytMeta);
+							mainWindow->setState(STATE::DEFAULT);
+							ResumeDeviceCheckingThread();
+
+							while(playRes == PLAY_NEXT_VIDEO)
+							{
+								YtResult nextVid;
+								if(!GetNextVideo(&nextVid))
+									break;
+
+								snprintf(rTask->videoId, sizeof(rTask->videoId), "%s", nextVid.videoId);
+								rTask->streamUrl[0] = '\0';
+								rTask->error[0] = '\0';
+								rTask->result = &nextVid;
+								rTask->done = false;
+
+								Thread nextThread;
+								nextThread.start([](void * arg) -> void * {
+									ResolveTask * t = static_cast<ResolveTask *>(arg);
+									t->success = ytResolveStream(t->videoId, t->streamUrl, sizeof(t->streamUrl), t->error, sizeof(t->error), t->result);
+									t->done = true;
+									return nullptr;
+								}, rTask.get(), 64 * 1024, ThreadPriority::Normal);
+
+								RunWithLoadingScreen("BrewTube", "Resolving video stream", rTask->done);
+								nextThread.join();
+
+								if(rTask->success)
+								{
+									HaltDeviceCheckingThread();
+									mainWindow->setState(STATE::DISABLED);
+									playRes = PlayFile(rTask->streamUrl, rTask->error, sizeof(rTask->error), nextVid.title, &nextVid);
+									mainWindow->setState(STATE::DEFAULT);
+									ResumeDeviceCheckingThread();
+								}
+								else
+								{
+									WindowPrompt("Playback Failed", rTask->error[0] ? rTask->error : "Could not resolve stream URL", "OK", nullptr);
+									break;
+								}
+							}
+
+							while(true)
+							{
+								platform->getInput()->update();
+								bool held = false;
+								for(int c = 0; c < 4; c++)
+								{
+									if(controller[c]->getPadData().buttons_h & (INPUT_BTN_B | INPUT_BTN_1))
+										held = true;
+								}
+								if(!held) break;
+								usleep(10000);
+							}
+							platform->getInput()->update();
+
+							for(int i = 0; i < visibleCount; i++)
+							{
+								if(cardBtn[i]) cardBtn[i]->resetState();
+							}
+
+							if(playRes == PLAY_EXIT)
+							{
+								platform->triggerExit();
+								inChannel = false;
+								stayInPage = false;
+								break;
+							}
+							if(playRes == PLAY_CHANNEL)
+							{
+								char nextChan[64], nextAuthor[128], nextAvatar[256];
+								if(GetNextChannel(nextChan, sizeof(nextChan), nextAuthor, sizeof(nextAuthor), nextAvatar, sizeof(nextAvatar)))
+								{
+									snprintf(currentChannel, sizeof(currentChannel), "%s", nextChan);
+									memset(&details, 0, sizeof(details));
+									if(nextAuthor[0]) snprintf(details.title, sizeof(details.title), "%s", nextAuthor);
+									if(nextAvatar[0]) snprintf(details.avatarUrl, sizeof(details.avatarUrl), "%s", nextAvatar);
+									currentTab = YT_CHAN_TAB_VIDEOS;
+									currentFilter = YT_CHAN_FILTER_NEWEST;
+									delete avatarImg; avatarImg = nullptr;
+									delete avatarData; avatarData = nullptr;
+									delete bannerImg; bannerImg = nullptr;
+									delete bannerData; bannerData = nullptr;
+									loadBrowse();
+									startHeaderLoad();
+									stayInPage = false;
+									break;
+								}
+							}
+							if(playRes == PLAY_ERROR) WindowPrompt("Error", rTask->error, "OK", nullptr);
+						}
+						else
+						{
+							WindowPrompt("Playback Failed", rTask->error[0] ? rTask->error : "Could not resolve stream URL", "OK", nullptr);
+						}
+					}
+				}
+			}
+			if(!stayInPage) break;
+
+			if(totalPages > 1 && page > 0 && prevBtn.getState() == STATE::CLICKED)
+			{
+				prevBtn.resetState();
+				page--;
+				stayInPage = false;
+				break;
+			}
+
+			if(totalPages > 1 && page + 1 < totalPages && nextBtn.getState() == STATE::CLICKED)
+			{
+				nextBtn.resetState();
+				page++;
+				stayInPage = false;
+				break;
+			}
+
+			uint32_t pressed = 0;
+			for(int i = 0; i < 4; i++)
+				pressed |= controller[i]->getPadData().buttons_d;
+
+			if(pressed & (INPUT_BTN_B | INPUT_BTN_1))
+			{
+				inChannel = false;
+				stayInPage = false;
+				break;
+			}
+
+			if(totalPages > 1 && (pressed & INPUT_BTN_LEFT))
+			{
+				if(page > 0)
+				{
+					page--;
+					stayInPage = false;
+					break;
+				}
+			}
+
+			if(totalPages > 1 && (pressed & INPUT_BTN_RIGHT))
+			{
+				if(page + 1 < totalPages)
+				{
+					page++;
+					stayInPage = false;
+					break;
+				}
+			}
+
+			if(currentTab == YT_CHAN_TAB_ABOUT)
+			{
+				if(pressed & INPUT_BTN_UP)
+				{
+					if(aboutScroll > 0)
+					{
+						aboutScroll -= 30;
+						if(aboutScroll < 0) aboutScroll = 0;
+						stayInPage = false;
+						break;
+					}
+				}
+				if(pressed & INPUT_BTN_DOWN)
+				{
+					if(aboutScroll < 400)
+					{
+						aboutScroll += 30;
+						stayInPage = false;
+						break;
+					}
+				}
+			}
+		}
+
+		if(currentTab != YT_CHAN_TAB_ABOUT)
+		{
+			for(int s = 0; s < visibleCount; s++)
+			{
+				delete cardBtn[s];
+				delete cardBg[s];
+				delete cardBgOver[s];
+				delete cardTitle[s];
+				delete cardMeta[s];
+			}
+		}
+	}
+
+	stopHeaderTask();
+	clearThumbnails();
+	delete avatarImg;
+	delete avatarData;
+	delete bannerImg;
+	delete bannerData;
+}
+
 static void MenuBrewTube()
 {
 	const PixelColor white = {255, 255, 255, 255};
 	const PixelColor grey = {170, 175, 190, 255};
-	const PixelColor darkBg = {18, 20, 28, 255};
 	const PixelColor cardNormal = {26, 30, 42, 255};
 	const PixelColor cardOver = {44, 52, 74, 255};
 	const PixelColor btnText = {25, 28, 38, 255};
@@ -915,12 +1828,15 @@ static void MenuBrewTube()
 
 	char currentQuery[128] = "";
 	int queryLen = 0;
-	YtResult currentResults[6];
+	std::unique_ptr<YtResult[]> currentResultsPtr(new YtResult[YT_MAX_RESULTS]);
+	YtResult * currentResults = currentResultsPtr.get();
 	int resultCount = 0;
 	int resultPage = 0;
+	char searchContinuation[1024] = "";
+	bool hasMoreResults = false;
 
-	GuiImageData * thumbData[6] = { nullptr };
-	GuiImage * thumbImg[6] = { nullptr };
+	GuiImageData * thumbData[YT_MAX_RESULTS] = { nullptr };
+	GuiImage * thumbImg[YT_MAX_RESULTS] = { nullptr };
 
 	auto clearThumbnails = [&]()
 	{
@@ -929,7 +1845,7 @@ static void MenuBrewTube()
 			gThumbTask->stop = true;
 			if(gThumbTask->thread.isRunning())
 				gThumbTask->thread.join();
-			for(int i = 0; i < 6; i++)
+			for(int i = 0; i < YT_MAX_RESULTS; i++)
 			{
 				if(gThumbTask->textures[i])
 				{
@@ -941,7 +1857,7 @@ static void MenuBrewTube()
 			gThumbTask = nullptr;
 		}
 
-		for(int i = 0; i < 6; i++)
+		for(int i = 0; i < YT_MAX_RESULTS; i++)
 		{
 			if(thumbImg[i]) { delete thumbImg[i]; thumbImg[i] = nullptr; }
 			if(thumbData[i]) { delete thumbData[i]; thumbData[i] = nullptr; }
@@ -1289,6 +2205,16 @@ static void MenuBrewTube()
 							if(playRes == PLAY_ERROR) WindowPrompt("Error", error, "OK", nullptr);
 						}
 					}
+					else if(otherChoice == 3)
+					{
+						char chanInput[128];
+						if(EnterUrlPrompt(chanInput, sizeof(chanInput), "Enter Channel (@handle / ID)"))
+						{
+							mainWindow->remove(&searchWin);
+							MenuChannel(chanInput);
+							mainWindow->appendWithAutoRemove(&searchWin);
+						}
+					}
 				}
 
 				if(exitBtn.getState() == STATE::CLICKED)
@@ -1315,20 +2241,23 @@ static void MenuBrewTube()
 							YtResult * results;
 							int maxResults;
 							char error[128];
+							char nextContinuation[1024];
 							int count = 0;
 							volatile bool done = false;
 						} sTask;
 
 						snprintf(sTask.query, sizeof(sTask.query), "%s", currentQuery);
 						sTask.results = currentResults;
-						sTask.maxResults = 6;
+						sTask.maxResults = 12;
 						sTask.error[0] = '\0';
+						sTask.nextContinuation[0] = '\0';
 						sTask.done = false;
 
 						Thread searchThread;
 						searchThread.start([](void * arg) -> void * {
 							SearchTask * t = static_cast<SearchTask *>(arg);
-							t->count = ytSearch(t->query, t->results, t->maxResults, t->error, sizeof(t->error));
+							t->count = ytSearch(t->query, t->results, t->maxResults, t->error, sizeof(t->error),
+								nullptr, t->nextContinuation, sizeof(t->nextContinuation));
 							t->done = true;
 							return nullptr;
 						}, &sTask, 64 * 1024, ThreadPriority::Normal);
@@ -1345,6 +2274,8 @@ static void MenuBrewTube()
 							clearThumbnails();
 							resultCount = sTask.count;
 							resultPage = 0;
+							snprintf(searchContinuation, sizeof(searchContinuation), "%s", sTask.nextContinuation);
+							hasMoreResults = searchContinuation[0] != '\0';
 							startAsyncThumbnails(currentResults, resultCount);
 
 							view = VIEW_RESULTS;
@@ -1399,6 +2330,7 @@ static void MenuBrewTube()
 			otherBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
 			otherBtn.setPosition(-90, 7);
 			otherBtn.setImage(&otherImg);
+			otherImgOver.setSize(90, 36);
 			otherBtn.setImageOver(&otherImgOver);
 			otherBtn.setLabel(&otherTxt);
 			otherBtn.setSoundOver(&btnSoundOver);
@@ -1440,6 +2372,7 @@ static void MenuBrewTube()
 			const int CARD_GAP = 10;
 
 			GuiButton * cardBtn[CARDS_PER_PAGE] = { nullptr };
+			GuiButton * cardAuthorBtn[CARDS_PER_PAGE] = { nullptr };
 			GuiImage * cardBg[CARDS_PER_PAGE] = { nullptr };
 			GuiImage * cardBgOver[CARDS_PER_PAGE] = { nullptr };
 			GuiText * cardTitle[CARDS_PER_PAGE] = { nullptr };
@@ -1493,24 +2426,56 @@ static void MenuBrewTube()
 				cardTitle[s]->setMaxWidth(415);
 				cardBtn[s]->setLabel(cardTitle[s], 0);
 
-				snprintf(cardAuthorStr[s], sizeof(cardAuthorStr[s]), "%s", currentResults[idx].author);
-				cardAuthor[s] = new GuiText(cardAuthorStr[s], 15, grey);
-				cardAuthor[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
-				cardAuthor[s]->setPosition(168, 42);
-				cardAuthor[s]->setMaxWidth(415);
-				cardBtn[s]->setLabel(cardAuthor[s], 1);
+				if(currentResults[idx].isChannel)
+				{
+					snprintf(cardAuthorStr[s], sizeof(cardAuthorStr[s]), "Channel");
+					cardAuthor[s] = new GuiText(cardAuthorStr[s], 15, grey);
+					cardAuthor[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+					cardAuthor[s]->setPosition(168, 42);
+					cardAuthor[s]->setMaxWidth(415);
+					cardBtn[s]->setLabel(cardAuthor[s], 1);
 
-				if(currentResults[idx].publishedText[0] != '\0' && currentResults[idx].viewCountText[0] != '\0')
-				{
-					snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s   •   %s", currentResults[idx].lengthText, currentResults[idx].viewCountText, currentResults[idx].publishedText);
-				}
-				else if(currentResults[idx].publishedText[0] != '\0')
-				{
-					snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s", currentResults[idx].lengthText, currentResults[idx].publishedText);
+					if(currentResults[idx].author[0] != '\0' && currentResults[idx].viewCountText[0] != '\0')
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s", currentResults[idx].author, currentResults[idx].viewCountText);
+					else if(currentResults[idx].author[0] != '\0')
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s", currentResults[idx].author);
+					else
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s", currentResults[idx].viewCountText);
 				}
 				else
 				{
-					snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s", currentResults[idx].lengthText, currentResults[idx].viewCountText);
+					snprintf(cardAuthorStr[s], sizeof(cardAuthorStr[s]), "%s", currentResults[idx].author);
+					cardAuthor[s] = new GuiText(cardAuthorStr[s], 15, grey);
+					cardAuthor[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+					cardAuthor[s]->setPosition(168, 42);
+					cardAuthor[s]->setMaxWidth(415);
+					cardBtn[s]->setLabel(cardAuthor[s], 1);
+
+					if(currentResults[idx].author[0] != '\0')
+					{
+						int authorW = cardAuthor[s]->getTextWidth();
+						if(authorW > 240) authorW = 240;
+						if(authorW < 20) authorW = 20;
+
+						cardAuthorBtn[s] = new GuiButton(authorW, 18);
+						cardAuthorBtn[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+						cardAuthorBtn[s]->setPosition((sw - CARD_W) / 2 + 168, cardY + 41);
+						cardAuthorBtn[s]->setTrigger(&trigA);
+						cardAuthorBtn[s]->setSoundOver(&btnSoundOver);
+					}
+
+					if(currentResults[idx].publishedText[0] != '\0' && currentResults[idx].viewCountText[0] != '\0')
+					{
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s   •   %s", currentResults[idx].lengthText, currentResults[idx].viewCountText, currentResults[idx].publishedText);
+					}
+					else if(currentResults[idx].publishedText[0] != '\0')
+					{
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s", currentResults[idx].lengthText, currentResults[idx].publishedText);
+					}
+					else
+					{
+						snprintf(cardMetaStr[s], sizeof(cardMetaStr[s]), "%s   •   %s", currentResults[idx].lengthText, currentResults[idx].viewCountText);
+					}
 				}
 				cardMeta[s] = new GuiText(cardMetaStr[s], 14, (PixelColor){135, 145, 170, 255});
 				cardMeta[s]->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
@@ -1519,6 +2484,7 @@ static void MenuBrewTube()
 				cardBtn[s]->setLabel(cardMeta[s], 2);
 
 				resultsWin.append(cardBtn[s]);
+				if(cardAuthorBtn[s]) resultsWin.append(cardAuthorBtn[s]);
 			}
 
 			int totalPages = (resultCount + CARDS_PER_PAGE - 1) / CARDS_PER_PAGE;
@@ -1558,14 +2524,64 @@ static void MenuBrewTube()
 			pageTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
 			pageTxt.setPosition(0, 426);
 
-			if(totalPages > 1)
+			bool canGoNext = (resultPage + 1 < totalPages) || (resultPage + 1 == totalPages && hasMoreResults && resultCount < YT_MAX_RESULTS);
+
+			if(totalPages > 1 || canGoNext)
 			{
 				if(resultPage > 0) resultsWin.append(&prevBtn);
 				resultsWin.append(&pageTxt);
-				if(resultPage + 1 < totalPages) resultsWin.append(&nextBtn);
+				if(canGoNext) resultsWin.append(&nextBtn);
 			}
 
 			mainWindow->appendWithAutoRemove(&resultsWin);
+
+			auto loadMoreResults = [&]() {
+				if(resultPage + 1 >= totalPages && hasMoreResults && resultCount < YT_MAX_RESULTS)
+				{
+					struct MoreTask
+					{
+						char continuation[1024];
+						YtResult * results;
+						int maxResults;
+						char error[128];
+						char nextContinuation[1024];
+						int count = 0;
+						volatile bool done = false;
+					} mTask;
+
+					snprintf(mTask.continuation, sizeof(mTask.continuation), "%s", searchContinuation);
+					mTask.results = currentResults + resultCount;
+					mTask.maxResults = YT_MAX_RESULTS - resultCount;
+					mTask.error[0] = '\0';
+					mTask.nextContinuation[0] = '\0';
+					mTask.done = false;
+
+					Thread moreThread;
+					moreThread.start([](void * arg) -> void * {
+						MoreTask * t = static_cast<MoreTask *>(arg);
+						t->count = ytSearch(nullptr, t->results, t->maxResults, t->error, sizeof(t->error),
+							t->continuation, t->nextContinuation, sizeof(t->nextContinuation));
+						t->done = true;
+						return nullptr;
+					}, &mTask, 64 * 1024, ThreadPriority::Normal);
+
+					RunWithLoadingScreen("BrewTube", "Loading more videos", mTask.done);
+					moreThread.join();
+
+					if(mTask.count > 0)
+					{
+						resultCount += mTask.count;
+						snprintf(searchContinuation, sizeof(searchContinuation), "%s", mTask.nextContinuation);
+						hasMoreResults = searchContinuation[0] != '\0';
+						startAsyncThumbnails(currentResults, resultCount);
+					}
+					else
+					{
+						hasMoreResults = false;
+					}
+				}
+				resultPage++;
+			};
 
 			bool stayInResults = true;
 			while(stayInResults && !platform->shouldExit())
@@ -1583,7 +2599,10 @@ static void MenuBrewTube()
 							thumbData[i] = new GuiImageData(gThumbTask->textures[i], gThumbTask->widths[i], gThumbTask->heights[i]);
 							gThumbTask->textures[i] = nullptr;
 							thumbImg[i] = new GuiImage(thumbData[i]);
-							thumbImg[i]->setSize(144, 81);
+							if(currentResults[i].isChannel)
+								thumbImg[i]->setSize(70, 70);
+							else
+								thumbImg[i]->setSize(144, 81);
 							thumbImg[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
 							thumbImg[i]->setPosition(10, 0);
 
@@ -1601,10 +2620,32 @@ static void MenuBrewTube()
 
 				for(int s = 0; s < visibleCount; s++)
 				{
+					if(cardAuthorBtn[s] && cardAuthorBtn[s]->getState() == STATE::CLICKED)
+					{
+						cardAuthorBtn[s]->resetState();
+						if(cardBtn[s]) cardBtn[s]->resetState();
+						int chosen = startIdx + s;
+						const char * cid = currentResults[chosen].channelId[0] ? currentResults[chosen].channelId : currentResults[chosen].author;
+						clearThumbnails();
+						mainWindow->remove(&resultsWin);
+						MenuChannel(cid, currentResults[chosen].author, currentResults[chosen].avatarUrl);
+						stayInResults = false;
+						break;
+					}
+
 					if(cardBtn[s] && cardBtn[s]->getState() == STATE::CLICKED)
 					{
 						cardBtn[s]->resetState();
 						int chosen = startIdx + s;
+
+						if(currentResults[chosen].isChannel)
+						{
+							clearThumbnails();
+							mainWindow->remove(&resultsWin);
+							MenuChannel(currentResults[chosen].channelId, currentResults[chosen].title, currentResults[chosen].avatarUrl);
+							stayInResults = false;
+							break;
+						}
 
 						struct ResolveTask
 						{
@@ -1614,13 +2655,14 @@ static void MenuBrewTube()
 							YtResult * result;
 							bool success = false;
 							volatile bool done = false;
-						} rTask;
+						};
+						std::unique_ptr<ResolveTask> rTask(new ResolveTask());
 
-						snprintf(rTask.videoId, sizeof(rTask.videoId), "%s", currentResults[chosen].videoId);
-						rTask.streamUrl[0] = '\0';
-						rTask.error[0] = '\0';
-						rTask.result = &currentResults[chosen];
-						rTask.done = false;
+						snprintf(rTask->videoId, sizeof(rTask->videoId), "%s", currentResults[chosen].videoId);
+						rTask->streamUrl[0] = '\0';
+						rTask->error[0] = '\0';
+						rTask->result = &currentResults[chosen];
+						rTask->done = false;
 
 						Thread resolveThread;
 						resolveThread.start([](void * arg) -> void * {
@@ -1628,18 +2670,56 @@ static void MenuBrewTube()
 							t->success = ytResolveStream(t->videoId, t->streamUrl, sizeof(t->streamUrl), t->error, sizeof(t->error), t->result);
 							t->done = true;
 							return nullptr;
-						}, &rTask, 64 * 1024, ThreadPriority::Normal);
+						}, rTask.get(), 64 * 1024, ThreadPriority::Normal);
 
-						RunWithLoadingScreen("BrewTube", "Resolving video stream", rTask.done);
+						RunWithLoadingScreen("BrewTube", "Resolving video stream", rTask->done);
 						resolveThread.join();
 
-						if(rTask.success)
+						if(rTask->success)
 						{
 							HaltDeviceCheckingThread();
 							mainWindow->setState(STATE::DISABLED);
-							PlayResult playRes = PlayFile(rTask.streamUrl, rTask.error, sizeof(rTask.error), currentResults[chosen].title, &currentResults[chosen]);
+							PlayResult playRes = PlayFile(rTask->streamUrl, rTask->error, sizeof(rTask->error), currentResults[chosen].title, &currentResults[chosen]);
 							mainWindow->setState(STATE::DEFAULT);
 							ResumeDeviceCheckingThread();
+
+							while(playRes == PLAY_NEXT_VIDEO)
+							{
+								YtResult nextVid;
+								if(!GetNextVideo(&nextVid))
+									break;
+
+								snprintf(rTask->videoId, sizeof(rTask->videoId), "%s", nextVid.videoId);
+								rTask->streamUrl[0] = '\0';
+								rTask->error[0] = '\0';
+								rTask->result = &nextVid;
+								rTask->done = false;
+
+								Thread nextThread;
+								nextThread.start([](void * arg) -> void * {
+									ResolveTask * t = static_cast<ResolveTask *>(arg);
+									t->success = ytResolveStream(t->videoId, t->streamUrl, sizeof(t->streamUrl), t->error, sizeof(t->error), t->result);
+									t->done = true;
+									return nullptr;
+								}, rTask.get(), 64 * 1024, ThreadPriority::Normal);
+
+								RunWithLoadingScreen("BrewTube", "Resolving video stream", rTask->done);
+								nextThread.join();
+
+								if(rTask->success)
+								{
+									HaltDeviceCheckingThread();
+									mainWindow->setState(STATE::DISABLED);
+									playRes = PlayFile(rTask->streamUrl, rTask->error, sizeof(rTask->error), nextVid.title, &nextVid);
+									mainWindow->setState(STATE::DEFAULT);
+									ResumeDeviceCheckingThread();
+								}
+								else
+								{
+									WindowPrompt("Playback Failed", rTask->error[0] ? rTask->error : "Could not resolve stream URL", "OK", nullptr);
+									break;
+								}
+							}
 
 							while(true)
 							{
@@ -1663,11 +2743,23 @@ static void MenuBrewTube()
 							}
 
 							if(playRes == PLAY_EXIT) return;
-							if(playRes == PLAY_ERROR) WindowPrompt("Error", rTask.error, "OK", nullptr);
+							if(playRes == PLAY_CHANNEL)
+							{
+								char nextChan[64], nextAuthor[128], nextAvatar[256];
+								if(GetNextChannel(nextChan, sizeof(nextChan), nextAuthor, sizeof(nextAuthor), nextAvatar, sizeof(nextAvatar)))
+								{
+									clearThumbnails();
+									mainWindow->remove(&resultsWin);
+									MenuChannel(nextChan, nextAuthor, nextAvatar);
+									stayInResults = false;
+									break;
+								}
+							}
+							if(playRes == PLAY_ERROR) WindowPrompt("Error", rTask->error, "OK", nullptr);
 						}
 						else
 						{
-							WindowPrompt("Playback Failed", rTask.error[0] ? rTask.error : "Could not resolve stream URL", "OK", nullptr);
+							WindowPrompt("Playback Failed", rTask->error[0] ? rTask->error : "Could not resolve stream URL", "OK", nullptr);
 						}
 					}
 				}
@@ -1686,10 +2778,10 @@ static void MenuBrewTube()
 					stayInResults = false;
 				}
 
-				if(totalPages > 1 && resultPage + 1 < totalPages && nextBtn.getState() == STATE::CLICKED)
+				if(canGoNext && nextBtn.getState() == STATE::CLICKED)
 				{
 					nextBtn.resetState();
-					resultPage++;
+					loadMoreResults();
 					stayInResults = false;
 				}
 
@@ -1733,6 +2825,16 @@ static void MenuBrewTube()
 							if(playRes == PLAY_ERROR) WindowPrompt("Error", error, "OK", nullptr);
 						}
 					}
+					else if(otherChoice == 3)
+					{
+						char chanInput[128];
+						if(EnterUrlPrompt(chanInput, sizeof(chanInput), "Enter Channel (@handle / ID)"))
+						{
+							mainWindow->remove(&resultsWin);
+							MenuChannel(chanInput);
+							stayInResults = false;
+						}
+					}
 				}
 
 				if(exitBtn.getState() == STATE::CLICKED)
@@ -1749,11 +2851,22 @@ static void MenuBrewTube()
 					view = VIEW_SEARCH;
 					stayInResults = false;
 				}
+				if((pressed & INPUT_BTN_LEFT) && resultPage > 0)
+				{
+					resultPage--;
+					stayInResults = false;
+				}
+				if((pressed & INPUT_BTN_RIGHT) && canGoNext)
+				{
+					loadMoreResults();
+					stayInResults = false;
+				}
 			}
 
 			for(int s = 0; s < visibleCount; s++)
 			{
 				delete cardBtn[s];
+				delete cardAuthorBtn[s];
 				delete cardBg[s];
 				delete cardBgOver[s];
 				delete cardTitle[s];

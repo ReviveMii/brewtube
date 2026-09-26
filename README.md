@@ -15,25 +15,33 @@ Install [Devkit-Pro](https://devkitpro.org/), [libogc2](https://github.com/extre
 Run ```make```
 
 ## Features
-- YouTube Video Search
-- YouTube Video Playback
+- Search
+- Video Playback
+- Channels
+- Captions
+- Video Metadata
+- No Ads
+- Video Suggestions
+- ReturnYouTubeDislikes
+- Better Video Playback
+
 
 ## TODO
 - Better Design
 - ~~480p Video Streams with VISIONOS client with ANDROID fallback (current client, 360p is the only available stream in ANDROID) (requires implementing adaptive streams): [yt-dlp example](https://github.com/yt-dlp/yt-dlp/blob/c7fb478d21e9e59524befbe23f7801bb267fb880/yt_dlp/extractor/youtube/_base.py#L296-L310)~~
 - Make VISIONOS client faster to replace ANDROID
-- Channels (channel name clickable in player and channels in search results)
+- ~~Channels (channel name clickable in player and channels in search results)~~
 - ~~Display video metadata and channel profile picture in player~~
 - Playlists (in search results)
 - Sign-In (with What to Watch, Subscriptions, Watch Later, Watch History, Favorites, Uploads and Playlists)
 - Comments
 - Pair Device
-- Like/Dislike metadata
-- Show video description
-- Video suggestions
+- ~~Like/Dislike metadata~~
+- ~~Show video description~~
+- ~~Video suggestions~~
 - Local Playlists
 - Categories
-- Captions
+- ~~Captions~~
 - Search Suggestions
 - Local Search History
 - Local Watch History
@@ -52,3 +60,4 @@ Run ```make```
 - [MbedTLS](https://github.com/Mbed-TLS/mbedtls) - used for ssl/tls
 - [wii-curl](https://github.com/AndrewPiroli/wii-curl) - used for using curl on the wii
 - [libwiisocket](https://gitlab.com/4TU/libwiisocket) - used for network requests
+- [returnyoutubedislike](https://www.returnyoutubedislike.com/) - used for the dislikes

@@ -590,7 +590,7 @@ DecResult decNext(Decoder *d, DecFrame *out)
 			if (d->videoEof && (d->audioEof || !d->actx))
 				return DEC_EOF;
 
-			int wantAudio = d->actx && !d->audioEof && (d->nextAudioPts <= d->lastVideoPts || !d->vctx || d->videoEof);
+			int wantAudio = d->actx && !d->audioEof && (d->nextAudioPts <= d->lastVideoPts + 1.0 || !d->vctx || d->videoEof);
 
 			if (wantAudio) {
 				if (d->havePktAudio) {

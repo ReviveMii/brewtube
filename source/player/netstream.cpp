@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 
 #include <curl/curl.h>
 #include <wiisocket.h>
@@ -225,22 +226,29 @@ void *threadEntry(void *arg)
 
 extern "C" int netInit()
 {
+	static Mutex netLock;
+	netLock.lock();
+
 	static int inited = 0;
-	if(inited)
-		return inited > 0 ? 1 : 0;
+	if(inited > 0)
+	{
+		netLock.unlock();
+		return 1;
+	}
 
-	curl_global_init(CURL_GLOBAL_ALL);
-
-	for(int attempt = 0; attempt < 3; attempt++)
+	for(int attempt = 0; attempt < 10; attempt++)
 	{
 		if(wiisocket_init() == 0)
 		{
+			curl_global_init(CURL_GLOBAL_ALL);
 			inited = 1;
+			netLock.unlock();
 			return 1;
 		}
+		usleep(500000);
 	}
 
-	inited = -1;
+	netLock.unlock();
 	return 0;
 }
 

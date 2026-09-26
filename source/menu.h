@@ -27,6 +27,7 @@ enum
 };
 
 void MainMenu();
+void MenuChannel(const char * channelIdOrHandle, const char * channelTitle = nullptr, const char * avatarUrl = nullptr);
 void DrawPointers();
 int WindowPrompt(const char * title, const char * msg, const char * btn1Label, const char * btn2Label);
 bool RunWithLoadingScreen(const char * title, const char * msg, volatile bool & done);

@@ -51,5 +51,6 @@
 #include "icon_forward_png.h"
 #include "icon_vol_down_png.h"
 #include "icon_vol_up_png.h"
+#include "icon_menu_png.h"
 
 #endif

@@ -23,11 +23,17 @@ enum PlayResult
 {
 	PLAY_DONE,
 	PLAY_ERROR,
-	PLAY_EXIT
+	PLAY_EXIT,
+	PLAY_CHANNEL,
+	PLAY_NEXT_VIDEO
 };
 
 struct YtResult;
 
 PlayResult PlayFile(const char * path, char * err, int errSize, const char * customTitle = nullptr, const YtResult * ytMeta = nullptr);
+void SetNextChannel(const char * channelId, const char * author, const char * avatarUrl);
+bool GetNextChannel(char * channelIdOut, int channelIdSize, char * authorOut, int authorSize, char * avatarUrlOut, int avatarUrlSize);
+void SetNextVideo(const YtResult & video);
+bool GetNextVideo(YtResult * videoOut);
 
 #endif
