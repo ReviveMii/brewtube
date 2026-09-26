@@ -152,7 +152,7 @@ class Player
 		uint32_t ringBaseRd = 0;
 		volatile uint32_t ringRd = 0;
 		volatile uint32_t ringWr = 0;
-		volatile uint32_t callbacks = 0;
+		volatile int pendingFill = 0;
 		volatile uint64_t lastCallback = 0;
 		bool ringFresh = true;
 		double ringBasePts = 0;
@@ -503,18 +503,19 @@ void Player::feedAudio(int voice)
 {
 	playingChunk = (playingChunk + 1) % AUDIO_BUFFERS;
 	lastCallback = gettime();
-
-	fillChunk(nextChunk);
-	if(ASND_AddVoice(voice, chunk[nextChunk], AUDIO_CHUNK * 4) == SND_OK)
-		nextChunk = (nextChunk + 1) % AUDIO_BUFFERS;
+	ASND_AddVoice(voice, chunk[nextChunk], AUDIO_CHUNK * 4);
+	nextChunk = (nextChunk + 1) % AUDIO_BUFFERS;
+	pendingFill++;
 }
 
 void Player::startAudio()
 {
 	fillChunk(0);
 	fillChunk(1);
+	fillChunk(2);
 	playingChunk = 0;
 	nextChunk = 2;
+	pendingFill = 0;
 	lastCallback = gettime();
 	ASND_SetVoice(AUDIO_VOICE, VOICE_STEREO_16BIT, info.sampleRate, 0, chunk[0], AUDIO_CHUNK * 4, volume, volume, audioCallback);
 	ASND_AddVoice(AUDIO_VOICE, chunk[1], AUDIO_CHUNK * 4);
@@ -635,6 +636,7 @@ void Player::requestSeek(double t)
 	{
 		ASND_StopVoice(AUDIO_VOICE);
 		audioRunning = false;
+		pendingFill = 0;
 	}
 
 	lock.lock();
@@ -1684,6 +1686,15 @@ PlayResult Player::run(char * err, int errSize)
 		if(started && !paused && info.hasVideo)
 			consumeVideo(clock());
 
+		if(audioRunning)
+		{
+			while(pendingFill > 0)
+			{
+				fillChunk(nextChunk);
+				pendingFill--;
+			}
+		}
+
 		if(selectedCaptionTrack >= 0 && selectedCaptionTrack < captionTracks.count && !trackCached[selectedCaptionTrack] && capTask.done)
 		{
 			if(capThread.isRunning())
@@ -1921,6 +1932,7 @@ exitPlayLoop:
 	{
 		ASND_StopVoice(AUDIO_VOICE);
 		audioRunning = false;
+		pendingFill = 0;
 	}
 
 	if(opening)
