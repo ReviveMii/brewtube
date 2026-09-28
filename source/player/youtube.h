@@ -20,6 +20,7 @@
 #define YOUTUBE_H
 
 #include <stdint.h>
+#include <string>
 #include <vector>
 
 #define YT_MAX_RESULTS 30
@@ -49,6 +50,7 @@ struct YtResult
 {
 	char videoId[16];
 	char channelId[64];
+	char playlistId[64];
 	char title[160];
 	char author[96];
 	char lengthText[16];
@@ -57,6 +59,7 @@ struct YtResult
 	char avatarUrl[256];
 	char description[512];
 	bool isChannel;
+	bool isPlaylist;
 };
 
 struct YtVoteData
@@ -129,5 +132,60 @@ void ytStartUpdateCheck();
 bool ytIsUpdateAvailable();
 bool ytGetCaptionTracks(YtCaptionTrackList *out);
 bool ytFetchCaptions(const char *url, std::vector<YtCaptionLine> &linesOut);
+
+struct YtSubscription
+{
+	char channelId[64];
+	char title[96];
+	char avatarUrl[256];
+};
+
+struct YtPlaylistItem
+{
+	char videoId[16];
+	char title[160];
+	char author[96];
+	char duration[16];
+	char thumbUrl[256];
+};
+
+bool ytIsSubscribed(const char *channelId);
+void ytToggleSubscription(const char *channelId, const char *title = nullptr, const char *avatarUrl = nullptr);
+std::vector<YtSubscription> ytGetSubscriptions();
+int ytFetchSubscriptionsFeed(YtResult *results, int maxResults, char *err, int errSize);
+int ytBrowseCategory(const char *browseId, YtResult *results, int maxResults, char *err, int errSize);
+bool ytPlaylistBrowse(const char *playlistId, char *titleOut, int titleOutSize, char *authorOut, int authorOutSize, YtPlaylistItem *items, int maxItems, int *outCount, char *err, int errSize);
+
+void prefsLoad();
+void prefsSave();
+int ytGetVolume();
+void ytSetVolume(int vol);
+bool ytGetCaptionsEnabled();
+void ytSetCaptionsEnabled(bool enabled);
+
+bool ytFetchSearchSuggestions(const char *query, std::vector<std::string> &suggestions, int maxSuggestions = 6);
+
+struct YtLocalPlaylistItem
+{
+	char videoId[16];
+	char title[160];
+	char author[96];
+	char duration[16];
+	char thumbUrl[256];
+};
+
+struct YtLocalPlaylist
+{
+	char id[64];
+	char title[64];
+	std::vector<YtLocalPlaylistItem> items;
+};
+
+std::vector<YtLocalPlaylist> ytGetLocalPlaylists();
+bool ytCreateLocalPlaylist(const char *title, char *outId = nullptr, int outIdSize = 0);
+bool ytDeleteLocalPlaylist(const char *playlistId);
+bool ytAddToLocalPlaylist(const char *playlistId, const YtLocalPlaylistItem &item);
+bool ytRemoveFromLocalPlaylist(const char *playlistId, const char *videoId);
+bool ytGetLocalPlaylist(const char *playlistId, YtLocalPlaylist &outPlaylist);
 
 #endif

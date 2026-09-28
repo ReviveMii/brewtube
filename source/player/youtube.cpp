@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <string>
 #include <vector>
+#include <memory>
 
 #include <curl/curl.h>
 #include <wiisocket.h>
@@ -34,6 +35,7 @@
 #include "json.h"
 #include "cacert_pem.h"
 #include "JPEGDEC.h"
+#include <png.h>
 
 namespace {
 
@@ -184,10 +186,12 @@ std::string jsonEscape(const char *s)
 	return out;
 }
 
+enum SearchType { SEARCH_VIDEO, SEARCH_CHANNEL, SEARCH_PLAYLIST };
+
 struct SearchRenderer
 {
 	const JsonValue *node;
-	bool isChannel;
+	SearchType type;
 };
 
 void collectSearchRenderers(const JsonValue &node, std::vector<SearchRenderer> &out, int maxResults, bool includeChannels = true)
@@ -200,13 +204,13 @@ void collectSearchRenderers(const JsonValue &node, std::vector<SearchRenderer> &
 		const JsonValue *vr = node.get("videoRenderer");
 		if(vr && vr->get("videoId"))
 		{
-			out.push_back({vr, false});
+			out.push_back({vr, SEARCH_VIDEO});
 			return;
 		}
 		const JsonValue *cvr = node.get("compactVideoRenderer");
 		if(cvr && cvr->get("videoId"))
 		{
-			out.push_back({cvr, false});
+			out.push_back({cvr, SEARCH_VIDEO});
 			return;
 		}
 		if(includeChannels)
@@ -214,9 +218,16 @@ void collectSearchRenderers(const JsonValue &node, std::vector<SearchRenderer> &
 			const JsonValue *cr = node.get("channelRenderer");
 			if(cr && cr->get("channelId"))
 			{
-				out.push_back({cr, true});
+				out.push_back({cr, SEARCH_CHANNEL});
 				return;
 			}
+		}
+		const JsonValue *pr = node.get("playlistRenderer");
+		if(!pr) pr = node.get("compactPlaylistRenderer");
+		if(pr && pr->get("playlistId"))
+		{
+			out.push_back({pr, SEARCH_PLAYLIST});
+			return;
 		}
 		for(const auto &kv : node.obj)
 			collectSearchRenderers(kv.second, out, maxResults, includeChannels);
@@ -329,6 +340,13 @@ void extractAvatarUrl(const JsonValue *vr, char *out, size_t outSize)
 	const JsonValue *ctlr = cts ? cts->get("channelThumbnailWithLinkRenderer") : nullptr;
 	const JsonValue *thumb = ctlr ? ctlr->get("thumbnail") : nullptr;
 	const JsonValue *thumbs = thumb ? thumb->get("thumbnails") : nullptr;
+	if(!thumbs && vr->get("channelThumbnail"))
+	{
+		const JsonValue *ct = vr->get("channelThumbnail");
+		thumbs = ct->get("thumbnails");
+		if(!thumbs && ct->get("thumbnail"))
+			thumbs = ct->get("thumbnail")->get("thumbnails");
+	}
 	if(thumbs && thumbs->size() > 0)
 	{
 		const JsonValue *u = thumbs->at(0)->get("url");
@@ -380,35 +398,128 @@ int jpegDrawCallback(JPEGDRAW *pDraw)
 	return 1;
 }
 
+struct PngMemReader
+{
+	const uint8_t *data;
+	size_t offset;
+	size_t size;
+};
+
+static void pngReadMemCb(png_structp png_ptr, png_bytep outBytes, png_size_t byteCountToRead)
+{
+	PngMemReader *r = static_cast<PngMemReader *>(png_get_io_ptr(png_ptr));
+	if(r->offset + byteCountToRead <= r->size)
+	{
+		memcpy(outBytes, r->data + r->offset, byteCountToRead);
+		r->offset += byteCountToRead;
+	}
+	else
+	{
+		size_t rem = r->size > r->offset ? r->size - r->offset : 0;
+		if(rem > 0)
+		{
+			memcpy(outBytes, r->data + r->offset, rem);
+			r->offset += rem;
+		}
+		memset(outBytes + rem, 0, byteCountToRead - rem);
+	}
+}
+
+static bool decodePngToRgba(const uint8_t *data, size_t size, std::vector<uint8_t> &outRgba, int &outW, int &outH)
+{
+	if(!data || size < 8) return false;
+	if(png_sig_cmp(static_cast<png_const_bytep>(data), 0, 8) != 0) return false;
+
+	png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+	if(!png_ptr) return false;
+
+	png_infop info_ptr = png_create_info_struct(png_ptr);
+	if(!info_ptr)
+	{
+		png_destroy_read_struct(&png_ptr, nullptr, nullptr);
+		return false;
+	}
+
+	if(setjmp(png_jmpbuf(png_ptr)))
+	{
+		png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+		return false;
+	}
+
+	PngMemReader reader = { data, 0, size };
+	png_set_read_fn(png_ptr, &reader, pngReadMemCb);
+	png_read_info(png_ptr, info_ptr);
+
+	png_uint_32 w = 0, h = 0;
+	int bit_depth = 0, color_type = 0;
+	png_get_IHDR(png_ptr, info_ptr, &w, &h, &bit_depth, &color_type, nullptr, nullptr, nullptr);
+
+	if(bit_depth == 16) png_set_strip_16(png_ptr);
+	if(color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png_ptr);
+	if(color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png_ptr);
+	if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS)) png_set_tRNS_to_alpha(png_ptr);
+	if(color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_PALETTE)
+		png_set_filler(png_ptr, 0xFF, PNG_FILLER_AFTER);
+	if(color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
+		png_set_gray_to_rgb(png_ptr);
+
+	png_read_update_info(png_ptr, info_ptr);
+	size_t rowBytes = png_get_rowbytes(png_ptr, info_ptr);
+
+	outRgba.resize(rowBytes * h);
+	std::vector<png_bytep> rowPointers(h);
+	for(png_uint_32 i = 0; i < h; i++)
+		rowPointers[i] = outRgba.data() + (size_t)i * rowBytes;
+
+	png_read_image(png_ptr, rowPointers.data());
+	png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+
+	outW = (int)w;
+	outH = (int)h;
+	return true;
+}
+
 void *decodeJpegToTexture(const uint8_t *data, size_t size, int maxW, int maxH, int *outW, int *outH)
 {
 	if(!data || size == 0)
 		return nullptr;
 
-	JPEGDEC jpeg;
-	if(!jpeg.openRAM((uint8_t *)data, (int)size, jpegDrawCallback))
-		return nullptr;
+	int srcW = 0, srcH = 0;
+	std::vector<uint8_t> rgba;
 
-	int srcW = jpeg.getWidth();
-	int srcH = jpeg.getHeight();
-	if(srcW <= 0 || srcH <= 0)
+	if(size >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0)
 	{
-		jpeg.close();
-		return nullptr;
+		if(!decodePngToRgba(data, size, rgba, srcW, srcH))
+			return nullptr;
 	}
-
-	JpegDecodeContext ctx;
-	ctx.width = srcW;
-	ctx.height = srcH;
-	ctx.rgba.resize((size_t)srcW * srcH * 4);
-
-	jpeg.setUserPointer(&ctx);
-	if(!jpeg.decode(0, 0, 0))
+	else
 	{
+		JPEGDEC jpeg;
+		if(!jpeg.openRAM((uint8_t *)data, (int)size, jpegDrawCallback))
+			return nullptr;
+
+		srcW = jpeg.getWidth();
+		srcH = jpeg.getHeight();
+		if(srcW <= 0 || srcH <= 0)
+		{
+			jpeg.close();
+			return nullptr;
+		}
+
+		JpegDecodeContext ctx;
+		ctx.width = srcW;
+		ctx.height = srcH;
+		ctx.rgba.resize((size_t)srcW * srcH * 4);
+
+		jpeg.setUserPointer(&ctx);
+		if(!jpeg.decode(0, 0, 0))
+		{
+			jpeg.close();
+			return nullptr;
+		}
 		jpeg.close();
-		return nullptr;
+		rgba = std::move(ctx.rgba);
 	}
-	jpeg.close();
 
 	double scale = 1.0;
 	if(maxW > 0 && srcW > maxW)
@@ -426,7 +537,7 @@ void *decodeJpegToTexture(const uint8_t *data, size_t size, int maxW, int maxH, 
 
 	if(dstW == srcW && dstH == srcH)
 	{
-		finalPixels = ctx.rgba.data();
+		finalPixels = rgba.data();
 	}
 	else
 	{
@@ -439,10 +550,10 @@ void *decodeJpegToTexture(const uint8_t *data, size_t size, int maxW, int maxH, 
 				int sx = x * srcW / dstW;
 				size_t sIdx = (size_t)(sy * srcW + sx) * 4;
 				size_t dIdx = (size_t)(y * dstW + x) * 4;
-				scaled[dIdx + 0] = ctx.rgba[sIdx + 0];
-				scaled[dIdx + 1] = ctx.rgba[sIdx + 1];
-				scaled[dIdx + 2] = ctx.rgba[sIdx + 2];
-				scaled[dIdx + 3] = 255;
+				scaled[dIdx + 0] = rgba[sIdx + 0];
+				scaled[dIdx + 1] = rgba[sIdx + 1];
+				scaled[dIdx + 2] = rgba[sIdx + 2];
+				scaled[dIdx + 3] = rgba[sIdx + 3];
 			}
 		}
 		finalPixels = scaled.data();
@@ -514,8 +625,11 @@ int ytSearch(const char *query, YtResult *results, int maxResults, char *err, in
 
 		const JsonValue *vr = sr.node;
 		YtResult &r = results[count];
+		r.isChannel = false;
+		r.isPlaylist = false;
+		r.playlistId[0] = '\0';
 
-		if(sr.isChannel)
+		if(sr.type == SEARCH_CHANNEL)
 		{
 			const char *cid = vr->get("channelId") ? vr->get("channelId")->asString("") : "";
 			if(cid[0] == '\0')
@@ -535,7 +649,29 @@ int ytSearch(const char *query, YtResult *results, int maxResults, char *err, in
 			continue;
 		}
 
-		r.isChannel = false;
+		if(sr.type == SEARCH_PLAYLIST)
+		{
+			const char *pid = vr->get("playlistId") ? vr->get("playlistId")->asString("") : "";
+			if(pid[0] == '\0')
+				continue;
+
+			r.isPlaylist = true;
+			snprintf(r.videoId, sizeof(r.videoId), "%s", pid);
+			snprintf(r.playlistId, sizeof(r.playlistId), "%s", pid);
+			r.channelId[0] = '\0';
+			snprintf(r.title, sizeof(r.title), "%s", firstRunText(vr->get("title"), "(playlist)"));
+			const char *author = firstRunText(vr->get("longBylineText"), "");
+			if(!author || author[0] == '\0') author = firstRunText(vr->get("shortBylineText"), "");
+			snprintf(r.author, sizeof(r.author), "%s", author ? author : "");
+			snprintf(r.lengthText, sizeof(r.lengthText), "%s", firstRunText(vr->get("videoCount"), "Playlist"));
+			r.viewCountText[0] = '\0';
+			r.publishedText[0] = '\0';
+			r.description[0] = '\0';
+			extractAvatarUrl(vr, r.avatarUrl, sizeof(r.avatarUrl));
+			count++;
+			continue;
+		}
+
 		const char *vid = vr->get("videoId") ? vr->get("videoId")->asString("") : "";
 		snprintf(r.videoId, sizeof(r.videoId), "%s", vid);
 		if(r.videoId[0] == '\0')
@@ -788,15 +924,71 @@ bool ytFetchVoteData(const char *videoId, YtVoteData *voteOut, char *err, int er
 }
 
 static YtClientType gClientType = YT_CLIENT_ANDROID;
+static int gVolume = 200;
+static bool gCaptionsEnabled = false;
+static std::vector<YtSubscription> gSubscriptions;
+static std::vector<YtLocalPlaylist> gLocalPlaylists;
+static bool gPrefsLoaded = false;
+static Mutex & getPrefsLock()
+{
+	static Mutex lock;
+	return lock;
+}
+
+void prefsLoad();
+void prefsSave();
 
 void ytSetClient(YtClientType client)
 {
+	prefsLoad();
+	getPrefsLock().lock();
 	gClientType = client;
+	prefsSave();
+	getPrefsLock().unlock();
 }
 
 YtClientType ytGetClient()
 {
+	prefsLoad();
 	return gClientType;
+}
+
+int ytGetVolume()
+{
+	prefsLoad();
+	return gVolume;
+}
+
+void ytSetVolume(int vol)
+{
+	prefsLoad();
+	if(vol < 0) vol = 0;
+	if(vol > 255) vol = 255;
+	getPrefsLock().lock();
+	if(gVolume != vol)
+	{
+		gVolume = vol;
+		prefsSave();
+	}
+	getPrefsLock().unlock();
+}
+
+bool ytGetCaptionsEnabled()
+{
+	prefsLoad();
+	return gCaptionsEnabled;
+}
+
+void ytSetCaptionsEnabled(bool enabled)
+{
+	prefsLoad();
+	getPrefsLock().lock();
+	if(gCaptionsEnabled != enabled)
+	{
+		gCaptionsEnabled = enabled;
+		prefsSave();
+	}
+	getPrefsLock().unlock();
 }
 
 static YtCaptionTrackList sLastCaptionTracks;
@@ -1413,7 +1605,7 @@ static void * updateCheckEntry(void * arg)
 			continue;
 
 		const char *tag = tagVal->asString("");
-		if(isVersionNewer(tag, "0.3"))
+		if(isVersionNewer(tag, "0.4"))
 		{
 			gUpdateAvailable = true;
 			break;
@@ -1583,6 +1775,18 @@ bool ytChannelBrowse(const char *channelIdOrHandle, YtChannelDetails *details, Y
 			const JsonValue *avm = img ? img->get("avatar") : nullptr;
 			const JsonValue *avvm = avm ? avm->get("avatarViewModel") : nullptr;
 			const JsonValue *srcs = avvm && avvm->get("image") ? avvm->get("image")->get("sources") : nullptr;
+			if(!srcs && vm->get("animatedImage"))
+			{
+				const JsonValue *cp = vm->get("animatedImage")->get("contentPreviewImageViewModel");
+				if(cp && cp->get("image"))
+					srcs = cp->get("image")->get("sources");
+			}
+			if(!srcs && vm->get("image") && vm->get("image")->get("contentPreviewImageViewModel"))
+			{
+				const JsonValue *cp = vm->get("image")->get("contentPreviewImageViewModel");
+				if(cp && cp->get("image"))
+					srcs = cp->get("image")->get("sources");
+			}
 			if(srcs && srcs->size() > 0 && srcs->at(0)->get("url"))
 			{
 				const char *u = srcs->at(0)->get("url")->asString("");
@@ -1879,26 +2083,50 @@ bool ytChannelBrowse(const char *channelIdOrHandle, YtChannelDetails *details, Y
 			{
 				const JsonValue *gpr = gri->at(gi)->get("gridPlaylistRenderer");
 				if(!gpr) gpr = gri->at(gi)->get("playlistRenderer");
-				if(!gpr) continue;
+				if(gpr)
+				{
+					YtChannelItem &pitem = items[count];
+					pitem.id[0] = '\0';
+					const char *pid = gpr->get("playlistId") ? gpr->get("playlistId")->asString("") : "";
+					snprintf(pitem.id, sizeof(pitem.id), "%s", pid);
+					pitem.duration[0] = '\0';
+					pitem.views[0] = '\0';
+					pitem.date[0] = '\0';
+					pitem.thumbUrl[0] = '\0';
+					pitem.isPlayable = false;
 
-				YtChannelItem &pitem = items[count];
-				pitem.id[0] = '\0';
-				pitem.duration[0] = '\0';
-				pitem.views[0] = '\0';
-				pitem.date[0] = '\0';
-				pitem.thumbUrl[0] = '\0';
-				pitem.isPlayable = false;
+					snprintf(pitem.title, sizeof(pitem.title), "%s", firstRunText(gpr->get("title"), "(playlist)"));
+					const char *vcount = firstRunText(gpr->get("videoCountShortText"), "");
+					if(!vcount || vcount[0] == '\0') vcount = firstRunText(gpr->get("videoCountText"), "");
+					snprintf(pitem.duration, sizeof(pitem.duration), "%s", vcount ? vcount : "Playlist");
 
-				snprintf(pitem.title, sizeof(pitem.title), "%s", firstRunText(gpr->get("title"), "(playlist)"));
-				const char *vcount = firstRunText(gpr->get("videoCountShortText"), "");
-				if(!vcount || vcount[0] == '\0') vcount = firstRunText(gpr->get("videoCountText"), "");
-				snprintf(pitem.duration, sizeof(pitem.duration), "%s", vcount ? vcount : "");
+					const JsonValue *th = gpr->get("thumbnail") ? gpr->get("thumbnail")->get("thumbnails") : nullptr;
+					if(th && th->size() > 0 && th->at(0)->get("url"))
+						snprintf(pitem.thumbUrl, sizeof(pitem.thumbUrl), "%s", th->at(0)->get("url")->asString(""));
 
-				const JsonValue *th = gpr->get("thumbnail") ? gpr->get("thumbnail")->get("thumbnails") : nullptr;
-				if(th && th->size() > 0 && th->at(0)->get("url"))
-					snprintf(pitem.thumbUrl, sizeof(pitem.thumbUrl), "%s", th->at(0)->get("url")->asString(""));
+					count++;
+					continue;
+				}
 
-				count++;
+				const JsonValue *gvr = gri->at(gi)->get("gridVideoRenderer");
+				if(gvr && gvr->get("videoId"))
+				{
+					YtChannelItem &vitem = items[count];
+					vitem.id[0] = '\0';
+					snprintf(vitem.id, sizeof(vitem.id), "%s", gvr->get("videoId")->asString(""));
+					vitem.isPlayable = true;
+					snprintf(vitem.title, sizeof(vitem.title), "%s", firstRunText(gvr->get("title"), "(untitled)"));
+					snprintf(vitem.duration, sizeof(vitem.duration), "%s", firstRunText(gvr->get("lengthText"), ""));
+					snprintf(vitem.views, sizeof(vitem.views), "%s", firstRunText(gvr->get("viewCountText"), ""));
+					snprintf(vitem.date, sizeof(vitem.date), "%s", firstRunText(gvr->get("publishedTimeText"), ""));
+
+					const JsonValue *th = gvr->get("thumbnail") ? gvr->get("thumbnail")->get("thumbnails") : nullptr;
+					if(th && th->size() > 0 && th->at(0)->get("url"))
+						snprintf(vitem.thumbUrl, sizeof(vitem.thumbUrl), "%s", th->at(0)->get("url")->asString(""));
+
+					count++;
+					continue;
+				}
 			}
 			continue;
 		}
@@ -1946,4 +2174,916 @@ bool ytChannelBrowse(const char *channelIdOrHandle, YtChannelDetails *details, Y
 
 	if(outCount) *outCount = count;
 	return true;
+}
+
+static const char *getPrefsFilePath()
+{
+	static char path[128] = "";
+	if(path[0] != '\0') return path;
+
+	FILE *fp = fopen("sd:/apps/brewtube/preferences.json", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "sd:/apps/brewtube/preferences.json"); return path; }
+
+	fp = fopen("sd:/brewtube_preferences.json", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "sd:/brewtube_preferences.json"); return path; }
+
+	fp = fopen("usb:/apps/brewtube/preferences.json", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "usb:/apps/brewtube/preferences.json"); return path; }
+
+	fp = fopen("usb:/brewtube_preferences.json", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "usb:/brewtube_preferences.json"); return path; }
+
+	FILE *test = fopen("sd:/apps/brewtube/preferences.json", "a");
+	if(test) { fclose(test); snprintf(path, sizeof(path), "sd:/apps/brewtube/preferences.json"); return path; }
+
+	test = fopen("sd:/brewtube_preferences.json", "a");
+	if(test) { fclose(test); snprintf(path, sizeof(path), "sd:/brewtube_preferences.json"); return path; }
+
+	snprintf(path, sizeof(path), "usb:/brewtube_preferences.json");
+	return path;
+}
+
+static const char *getSubsFilePath()
+{
+	static char path[128] = "";
+	if(path[0] != '\0') return path;
+
+	FILE *fp = fopen("sd:/apps/brewtube/subscriptions.txt", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "sd:/apps/brewtube/subscriptions.txt"); return path; }
+
+	fp = fopen("sd:/brewtube_subscriptions.txt", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "sd:/brewtube_subscriptions.txt"); return path; }
+
+	fp = fopen("usb:/apps/brewtube/subscriptions.txt", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "usb:/apps/brewtube/subscriptions.txt"); return path; }
+
+	fp = fopen("usb:/brewtube_subscriptions.txt", "r");
+	if(fp) { fclose(fp); snprintf(path, sizeof(path), "usb:/brewtube_subscriptions.txt"); return path; }
+
+	FILE *test = fopen("sd:/apps/brewtube/subscriptions.txt", "a");
+	if(test) { fclose(test); snprintf(path, sizeof(path), "sd:/apps/brewtube/subscriptions.txt"); return path; }
+
+	test = fopen("sd:/brewtube_subscriptions.txt", "a");
+	if(test) { fclose(test); snprintf(path, sizeof(path), "sd:/brewtube_subscriptions.txt"); return path; }
+
+	snprintf(path, sizeof(path), "usb:/brewtube_subscriptions.txt");
+	return path;
+}
+
+void prefsSave()
+{
+	const char *fpath = getPrefsFilePath();
+	FILE *fp = fopen(fpath, "w");
+	if(fp)
+	{
+		fprintf(fp, "{\n");
+		fprintf(fp, "  \"client\": \"%s\",\n", gClientType == YT_CLIENT_VISIONOS ? "VISIONOS" : "ANDROID");
+		fprintf(fp, "  \"volume\": %d,\n", gVolume);
+		fprintf(fp, "  \"captions\": %s,\n", gCaptionsEnabled ? "true" : "false");
+		fprintf(fp, "  \"subscriptions\": [\n");
+		for(size_t i = 0; i < gSubscriptions.size(); i++)
+		{
+			const auto &s = gSubscriptions[i];
+			fprintf(fp, "    {\"channelId\": \"%s\", \"title\": \"%s\", \"avatarUrl\": \"%s\"}%s\n",
+				jsonEscape(s.channelId).c_str(),
+				jsonEscape(s.title).c_str(),
+				jsonEscape(s.avatarUrl).c_str(),
+				(i + 1 < gSubscriptions.size()) ? "," : "");
+		}
+		fprintf(fp, "  ],\n");
+		fprintf(fp, "  \"playlists\": [\n");
+		for(size_t p = 0; p < gLocalPlaylists.size(); p++)
+		{
+			const auto &pl = gLocalPlaylists[p];
+			fprintf(fp, "    {\n");
+			fprintf(fp, "      \"id\": \"%s\",\n", jsonEscape(pl.id).c_str());
+			fprintf(fp, "      \"title\": \"%s\",\n", jsonEscape(pl.title).c_str());
+			fprintf(fp, "      \"items\": [\n");
+			for(size_t i = 0; i < pl.items.size(); i++)
+			{
+				const auto &itm = pl.items[i];
+				fprintf(fp, "        {\"videoId\": \"%s\", \"title\": \"%s\", \"author\": \"%s\", \"duration\": \"%s\", \"thumbUrl\": \"%s\"}%s\n",
+					jsonEscape(itm.videoId).c_str(),
+					jsonEscape(itm.title).c_str(),
+					jsonEscape(itm.author).c_str(),
+					jsonEscape(itm.duration).c_str(),
+					jsonEscape(itm.thumbUrl).c_str(),
+					(i + 1 < pl.items.size()) ? "," : "");
+			}
+			fprintf(fp, "      ]\n");
+			fprintf(fp, "    }%s\n", (p + 1 < gLocalPlaylists.size()) ? "," : "");
+		}
+		fprintf(fp, "  ]\n");
+		fprintf(fp, "}\n");
+		fclose(fp);
+	}
+
+	const char *subsPath = getSubsFilePath();
+	FILE *sfp = fopen(subsPath, "w");
+	if(sfp)
+	{
+		for(const auto &s : gSubscriptions)
+			fprintf(sfp, "%s|%s|%s\n", s.channelId, s.title, s.avatarUrl);
+		fclose(sfp);
+	}
+}
+
+void prefsLoad()
+{
+	getPrefsLock().lock();
+	if(gPrefsLoaded)
+	{
+		getPrefsLock().unlock();
+		return;
+	}
+	gPrefsLoaded = true;
+
+	const char *fpath = getPrefsFilePath();
+	FILE *fp = fopen(fpath, "rb");
+	if(fp)
+	{
+		fseek(fp, 0, SEEK_END);
+		long sz = ftell(fp);
+		fseek(fp, 0, SEEK_SET);
+		if(sz > 0 && sz < 1024 * 1024)
+		{
+			std::string content;
+			content.resize(sz);
+			fread(&content[0], 1, sz, fp);
+			fclose(fp);
+			fp = nullptr;
+
+			JsonValue root;
+			if(jsonParse(content.c_str(), content.size(), root))
+			{
+				const JsonValue *c = root.get("client");
+				if(c)
+				{
+					if(c->type == JsonType::String && strcmp(c->asString(""), "VISIONOS") == 0)
+						gClientType = YT_CLIENT_VISIONOS;
+					else if(c->type == JsonType::Number && c->asInt(0) == 1)
+						gClientType = YT_CLIENT_VISIONOS;
+					else
+						gClientType = YT_CLIENT_ANDROID;
+				}
+
+				const JsonValue *vol = root.get("volume");
+				if(vol)
+				{
+					int v = vol->asInt(200);
+					if(v < 0) v = 0;
+					if(v > 255) v = 255;
+					gVolume = v;
+				}
+
+				const JsonValue *caps = root.get("captions");
+				if(caps)
+				{
+					gCaptionsEnabled = caps->asBool(false);
+				}
+
+				const JsonValue *subs = root.get("subscriptions");
+				if(subs && subs->type == JsonType::Array)
+				{
+					gSubscriptions.clear();
+					for(const auto &item : subs->arr)
+					{
+						const JsonValue *cid = item.get("channelId");
+						if(cid && cid->asString("")[0] != '\0')
+						{
+							YtSubscription s;
+							memset(&s, 0, sizeof(s));
+							snprintf(s.channelId, sizeof(s.channelId), "%s", cid->asString(""));
+							const JsonValue *title = item.get("title");
+							snprintf(s.title, sizeof(s.title), "%s", title ? title->asString("") : s.channelId);
+							const JsonValue *av = item.get("avatarUrl");
+							snprintf(s.avatarUrl, sizeof(s.avatarUrl), "%s", av ? av->asString("") : "");
+							gSubscriptions.push_back(s);
+						}
+					}
+				}
+
+				const JsonValue *pls = root.get("playlists");
+				if(pls && pls->type == JsonType::Array)
+				{
+					gLocalPlaylists.clear();
+					for(const auto &pNode : pls->arr)
+					{
+						const JsonValue *pid = pNode.get("id");
+						const JsonValue *ptitle = pNode.get("title");
+						if(pid && pid->asString("")[0] != '\0')
+						{
+							YtLocalPlaylist pl;
+							pl.id[0] = '\0';
+							pl.title[0] = '\0';
+							snprintf(pl.id, sizeof(pl.id), "%s", pid->asString(""));
+							snprintf(pl.title, sizeof(pl.title), "%s", ptitle ? ptitle->asString(pl.id) : pl.id);
+
+							const JsonValue *items = pNode.get("items");
+							if(items && items->type == JsonType::Array)
+							{
+								for(const auto &iNode : items->arr)
+								{
+									const JsonValue *vid = iNode.get("videoId");
+									if(vid && vid->asString("")[0] != '\0')
+									{
+										YtLocalPlaylistItem itm;
+										memset(&itm, 0, sizeof(itm));
+										snprintf(itm.videoId, sizeof(itm.videoId), "%s", vid->asString(""));
+										const JsonValue *t = iNode.get("title");
+										snprintf(itm.title, sizeof(itm.title), "%s", t ? t->asString(itm.videoId) : itm.videoId);
+										const JsonValue *a = iNode.get("author");
+										snprintf(itm.author, sizeof(itm.author), "%s", a ? a->asString("") : "");
+										const JsonValue *d = iNode.get("duration");
+										snprintf(itm.duration, sizeof(itm.duration), "%s", d ? d->asString("") : "");
+										const JsonValue *th = iNode.get("thumbUrl");
+										snprintf(itm.thumbUrl, sizeof(itm.thumbUrl), "%s", th ? th->asString("") : "");
+										pl.items.push_back(itm);
+									}
+								}
+							}
+							gLocalPlaylists.push_back(pl);
+						}
+					}
+				}
+			}
+		}
+		if(fp) fclose(fp);
+	}
+
+	if(gSubscriptions.empty())
+	{
+		const char *subsPath = getSubsFilePath();
+		FILE *sfp = fopen(subsPath, "r");
+		if(sfp)
+		{
+			char line[512];
+			while(fgets(line, sizeof(line), sfp))
+			{
+				int len = strlen(line);
+				while(len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n')) line[--len] = '\0';
+				if(len == 0) continue;
+
+				char *p1 = strchr(line, '|');
+				if(!p1) continue;
+				*p1 = '\0';
+				char *p2 = strchr(p1 + 1, '|');
+				if(p2) *p2 = '\0';
+
+				YtSubscription sub;
+				memset(&sub, 0, sizeof(sub));
+				snprintf(sub.channelId, sizeof(sub.channelId), "%s", line);
+				snprintf(sub.title, sizeof(sub.title), "%s", p1 + 1);
+				if(p2) snprintf(sub.avatarUrl, sizeof(sub.avatarUrl), "%s", p2 + 1);
+				gSubscriptions.push_back(sub);
+			}
+			fclose(sfp);
+			if(!gSubscriptions.empty())
+				prefsSave();
+		}
+	}
+	getPrefsLock().unlock();
+}
+
+std::vector<YtSubscription> ytGetSubscriptions()
+{
+	prefsLoad();
+	getPrefsLock().lock();
+	std::vector<YtSubscription> list = gSubscriptions;
+	getPrefsLock().unlock();
+	return list;
+}
+
+bool ytIsSubscribed(const char *channelId)
+{
+	if(!channelId || channelId[0] == '\0') return false;
+	prefsLoad();
+	getPrefsLock().lock();
+	for(const auto &s : gSubscriptions)
+	{
+		if(strcmp(s.channelId, channelId) == 0)
+		{
+			getPrefsLock().unlock();
+			return true;
+		}
+	}
+	getPrefsLock().unlock();
+	return false;
+}
+
+void ytToggleSubscription(const char *channelId, const char *title, const char *avatarUrl)
+{
+	if(!channelId || channelId[0] == '\0') return;
+	prefsLoad();
+	getPrefsLock().lock();
+
+	bool found = false;
+	for(size_t i = 0; i < gSubscriptions.size(); i++)
+	{
+		if(strcmp(gSubscriptions[i].channelId, channelId) == 0)
+		{
+			gSubscriptions.erase(gSubscriptions.begin() + i);
+			found = true;
+			break;
+		}
+	}
+
+	if(!found)
+	{
+		YtSubscription s;
+		memset(&s, 0, sizeof(s));
+		snprintf(s.channelId, sizeof(s.channelId), "%s", channelId);
+		snprintf(s.title, sizeof(s.title), "%s", title && title[0] ? title : channelId);
+		snprintf(s.avatarUrl, sizeof(s.avatarUrl), "%s", avatarUrl ? avatarUrl : "");
+		gSubscriptions.push_back(s);
+	}
+
+	prefsSave();
+	getPrefsLock().unlock();
+}
+
+std::vector<YtLocalPlaylist> ytGetLocalPlaylists()
+{
+	prefsLoad();
+	getPrefsLock().lock();
+	std::vector<YtLocalPlaylist> pls = gLocalPlaylists;
+	getPrefsLock().unlock();
+	return pls;
+}
+
+bool ytCreateLocalPlaylist(const char *title, char *outId, int outIdSize)
+{
+	if(!title || title[0] == '\0') return false;
+	prefsLoad();
+	getPrefsLock().lock();
+
+	char idBuf[64];
+	snprintf(idBuf, sizeof(idBuf), "pl_%08x", (unsigned int)time(nullptr) + (unsigned int)gLocalPlaylists.size());
+	if(outId && outIdSize > 0)
+		snprintf(outId, outIdSize, "%s", idBuf);
+
+	YtLocalPlaylist pl;
+	pl.id[0] = '\0';
+	pl.title[0] = '\0';
+	snprintf(pl.id, sizeof(pl.id), "%s", idBuf);
+	snprintf(pl.title, sizeof(pl.title), "%s", title);
+	gLocalPlaylists.push_back(pl);
+
+	prefsSave();
+	getPrefsLock().unlock();
+	return true;
+}
+
+bool ytDeleteLocalPlaylist(const char *playlistId)
+{
+	if(!playlistId || playlistId[0] == '\0') return false;
+	prefsLoad();
+	getPrefsLock().lock();
+
+	bool found = false;
+	for(size_t i = 0; i < gLocalPlaylists.size(); i++)
+	{
+		if(strcmp(gLocalPlaylists[i].id, playlistId) == 0)
+		{
+			gLocalPlaylists.erase(gLocalPlaylists.begin() + i);
+			found = true;
+			break;
+		}
+	}
+
+	if(found) prefsSave();
+	getPrefsLock().unlock();
+	return found;
+}
+
+bool ytAddToLocalPlaylist(const char *playlistId, const YtLocalPlaylistItem &item)
+{
+	if(!playlistId || playlistId[0] == '\0' || item.videoId[0] == '\0') return false;
+	prefsLoad();
+	getPrefsLock().lock();
+
+	bool found = false;
+	for(auto &pl : gLocalPlaylists)
+	{
+		if(strcmp(pl.id, playlistId) == 0)
+		{
+			for(const auto &it : pl.items)
+			{
+				if(strcmp(it.videoId, item.videoId) == 0)
+				{
+					getPrefsLock().unlock();
+					return true;
+				}
+			}
+			pl.items.push_back(item);
+			found = true;
+			break;
+		}
+	}
+
+	if(found) prefsSave();
+	getPrefsLock().unlock();
+	return found;
+}
+
+bool ytRemoveFromLocalPlaylist(const char *playlistId, const char *videoId)
+{
+	if(!playlistId || playlistId[0] == '\0' || !videoId || videoId[0] == '\0') return false;
+	prefsLoad();
+	getPrefsLock().lock();
+
+	bool found = false;
+	for(auto &pl : gLocalPlaylists)
+	{
+		if(strcmp(pl.id, playlistId) == 0)
+		{
+			for(size_t i = 0; i < pl.items.size(); i++)
+			{
+				if(strcmp(pl.items[i].videoId, videoId) == 0)
+				{
+					pl.items.erase(pl.items.begin() + i);
+					found = true;
+					break;
+				}
+			}
+			break;
+		}
+	}
+
+	if(found) prefsSave();
+	getPrefsLock().unlock();
+	return found;
+}
+
+bool ytGetLocalPlaylist(const char *playlistId, YtLocalPlaylist &outPlaylist)
+{
+	if(!playlistId || playlistId[0] == '\0') return false;
+	prefsLoad();
+	getPrefsLock().lock();
+
+	bool found = false;
+	for(const auto &pl : gLocalPlaylists)
+	{
+		if(strcmp(pl.id, playlistId) == 0)
+		{
+			outPlaylist = pl;
+			found = true;
+			break;
+		}
+	}
+
+	getPrefsLock().unlock();
+	return found;
+}
+
+bool ytFetchSearchSuggestions(const char *query, std::vector<std::string> &suggestions, int maxSuggestions)
+{
+	suggestions.clear();
+	if(!query || query[0] == '\0') return false;
+
+	std::string encoded;
+	for(const char *p = query; *p; p++)
+	{
+		unsigned char c = (unsigned char)*p;
+		if(isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+			encoded += c;
+		else if(c == ' ')
+			encoded += '+';
+		else
+		{
+			char buf[4];
+			snprintf(buf, sizeof(buf), "%%%02X", c);
+			encoded += buf;
+		}
+	}
+
+	std::string url = "https://suggestqueries-clients6.youtube.com/complete/search?ds=yt&hl=en&gl=us&client=youtube&gs_ri=youtube&q=" + encoded;
+	std::string response;
+	if(!httpGetBinary(url.c_str(), response, 4) || response.empty())
+		return false;
+
+	const char *start = strchr(response.c_str(), '[');
+	const char *end = strrchr(response.c_str(), ']');
+	if(!start || !end || end <= start)
+		return false;
+
+	std::string jsonStr(start, end - start + 1);
+	JsonValue root;
+	if(!jsonParse(jsonStr.c_str(), jsonStr.size(), root) || root.type != JsonType::Array || root.arr.size() < 2)
+		return false;
+
+	const JsonValue *items = root.at(1);
+	if(!items || items->type != JsonType::Array)
+		return false;
+
+	for(const auto &it : items->arr)
+	{
+		if(it.type == JsonType::Array && it.arr.size() > 0)
+		{
+			const JsonValue *s = it.at(0);
+			if(s && s->type == JsonType::String && s->asString("")[0] != '\0')
+			{
+				suggestions.push_back(s->asString(""));
+				if((int)suggestions.size() >= maxSuggestions)
+					break;
+			}
+		}
+	}
+
+	return !suggestions.empty();
+}
+
+int ytFetchSubscriptionsFeed(YtResult *results, int maxResults, char *err, int errSize)
+{
+	std::vector<YtSubscription> subs = ytGetSubscriptions();
+	if(subs.empty())
+	{
+		snprintf(err, errSize, "No channels subscribed yet");
+		return 0;
+	}
+
+	int count = 0;
+	std::unique_ptr<YtChannelItem[]> cItems(new YtChannelItem[10]);
+
+	for(const auto &sub : subs)
+	{
+		if(count >= maxResults) break;
+		int cCount = 0;
+		char cErr[128];
+		if(ytChannelBrowse(sub.channelId, nullptr, YT_CHAN_TAB_VIDEOS, YT_CHAN_FILTER_NEWEST, cItems.get(), 6, &cCount, cErr, sizeof(cErr)))
+		{
+			for(int i = 0; i < cCount && count < maxResults; i++)
+			{
+				if(!cItems[i].isPlayable || cItems[i].id[0] == '\0') continue;
+				YtResult &r = results[count];
+				memset(&r, 0, sizeof(r));
+				r.isChannel = false;
+				r.isPlaylist = false;
+				snprintf(r.videoId, sizeof(r.videoId), "%s", cItems[i].id);
+				snprintf(r.title, sizeof(r.title), "%s", cItems[i].title);
+				snprintf(r.channelId, sizeof(r.channelId), "%s", sub.channelId);
+				snprintf(r.author, sizeof(r.author), "%s", sub.title[0] ? sub.title : sub.channelId);
+				snprintf(r.avatarUrl, sizeof(r.avatarUrl), "%s", sub.avatarUrl);
+				snprintf(r.lengthText, sizeof(r.lengthText), "%s", cItems[i].duration);
+				snprintf(r.viewCountText, sizeof(r.viewCountText), "%s", cItems[i].views);
+				snprintf(r.publishedText, sizeof(r.publishedText), "%s", cItems[i].date);
+				count++;
+			}
+		}
+	}
+
+	if(count == 0)
+		snprintf(err, errSize, "No videos found in subscriptions");
+	return count;
+}
+
+static void extractVideosFromNode(const JsonValue &node, YtResult *results, int &count, int maxResults)
+{
+	if(count >= maxResults) return;
+
+	if(node.type == JsonType::Object)
+	{
+		const JsonValue *vr = node.get("videoRenderer");
+		if(!vr) vr = node.get("compactVideoRenderer");
+		if(!vr) vr = node.get("gridVideoRenderer");
+		if(vr && vr->get("videoId"))
+		{
+			const char *vid = vr->get("videoId")->asString("");
+			if(vid[0] != '\0')
+			{
+				YtResult &r = results[count];
+				memset(&r, 0, sizeof(r));
+				r.isChannel = false;
+				r.isPlaylist = false;
+				snprintf(r.videoId, sizeof(r.videoId), "%s", vid);
+				snprintf(r.channelId, sizeof(r.channelId), "%s", extractChannelId(vr));
+				extractAvatarUrl(vr, r.avatarUrl, sizeof(r.avatarUrl));
+				snprintf(r.title, sizeof(r.title), "%s", firstRunText(vr->get("title"), "(untitled)"));
+
+				const char *author = firstRunText(vr->get("shortBylineText"), "");
+				if(!author || author[0] == '\0') author = firstRunText(vr->get("longBylineText"), "");
+				if(!author || author[0] == '\0') author = firstRunText(vr->get("ownerText"), "");
+				snprintf(r.author, sizeof(r.author), "%s", author ? author : "");
+
+				snprintf(r.lengthText, sizeof(r.lengthText), "%s", firstRunText(vr->get("lengthText"), ""));
+				if(r.lengthText[0] == '\0')
+				{
+					const JsonValue *overlays = vr->get("thumbnailOverlays");
+					if(overlays && overlays->type == JsonType::Array)
+					{
+						for(const auto &ov : overlays->arr)
+						{
+							const JsonValue *tov = ov.get("thumbnailOverlayTimeStatusRenderer");
+							if(tov)
+							{
+								const char *dur = firstRunText(tov->get("text"), "");
+								if(dur && dur[0] != '\0')
+								{
+									snprintf(r.lengthText, sizeof(r.lengthText), "%s", dur);
+									break;
+								}
+							}
+						}
+					}
+				}
+
+				const char *views = firstRunText(vr->get("shortViewCountText"), "");
+				if(!views || views[0] == '\0') views = firstRunText(vr->get("viewCountText"), "");
+				snprintf(r.viewCountText, sizeof(r.viewCountText), "%s", views ? views : "");
+
+				if(r.viewCountText[0] == '\0')
+				{
+					const JsonValue *badges = vr->get("badges");
+					if(badges && badges->type == JsonType::Array)
+					{
+						for(const auto &b : badges->arr)
+						{
+							const JsonValue *mbr = b.get("metadataBadgeRenderer");
+							if(mbr && mbr->get("label"))
+							{
+								const char *lbl = mbr->get("label")->asString("");
+								if(lbl && lbl[0] != '\0')
+								{
+									snprintf(r.viewCountText, sizeof(r.viewCountText), "%s", lbl);
+									break;
+								}
+							}
+						}
+					}
+				}
+
+				snprintf(r.publishedText, sizeof(r.publishedText), "%s", firstRunText(vr->get("publishedTimeText"), ""));
+				count++;
+				if(count >= maxResults) return;
+			}
+		}
+
+		const JsonValue *lvm = node.get("lockupViewModel");
+		if(lvm)
+		{
+			const char *cid = lvm->get("contentId") ? lvm->get("contentId")->asString("") : "";
+			const char *ctype = lvm->get("contentType") ? lvm->get("contentType")->asString("") : "";
+			if(cid[0] != '\0')
+			{
+				const JsonValue *meta = lvm->get("metadata");
+				const JsonValue *lmvm = meta ? meta->get("lockupMetadataViewModel") : nullptr;
+				const JsonValue *titleVal = lmvm && lmvm->get("title") ? lmvm->get("title")->get("content") : nullptr;
+				const char *title = titleVal ? titleVal->asString("") : "";
+				if(title[0] != '\0')
+				{
+					YtResult &r = results[count];
+					memset(&r, 0, sizeof(r));
+
+					bool isPl = (strcmp(ctype, "LOCKUP_CONTENT_TYPE_ALBUM") == 0 ||
+					             strcmp(ctype, "LOCKUP_CONTENT_TYPE_PLAYLIST") == 0 ||
+					             strncmp(cid, "RD", 2) == 0 ||
+					             strncmp(cid, "PL", 2) == 0 ||
+					             strlen(cid) > 11);
+
+					r.isChannel = false;
+					r.isPlaylist = isPl;
+					if(isPl)
+					{
+						snprintf(r.playlistId, sizeof(r.playlistId), "%s", cid);
+						snprintf(r.videoId, sizeof(r.videoId), "%s", cid);
+						r.lengthText[0] = '\0';
+					}
+					else
+					{
+						snprintf(r.videoId, sizeof(r.videoId), "%s", cid);
+					}
+					snprintf(r.title, sizeof(r.title), "%s", title);
+
+					const JsonValue *cmvm = lmvm ? (lmvm->get("metadata") ? lmvm->get("metadata")->get("contentMetadataViewModel") : nullptr) : nullptr;
+					const JsonValue *rows = cmvm ? cmvm->get("metadataRows") : (lmvm ? lmvm->get("metadataRows") : nullptr);
+					if(rows && rows->size() > 0)
+					{
+						const JsonValue *parts = rows->at(0)->get("metadataParts");
+						if(parts && parts->size() > 0 && parts->at(0)->get("text") && parts->at(0)->get("text")->get("content"))
+							snprintf(r.author, sizeof(r.author), "%s", parts->at(0)->get("text")->get("content")->asString(""));
+						if(rows->size() > 1)
+						{
+							const JsonValue *parts2 = rows->at(1)->get("metadataParts");
+							if(parts2 && parts2->size() > 0 && parts2->at(0)->get("text") && parts2->at(0)->get("text")->get("content"))
+								snprintf(r.viewCountText, sizeof(r.viewCountText), "%s", parts2->at(0)->get("text")->get("content")->asString(""));
+							if(parts2 && parts2->size() > 1 && parts2->at(1)->get("text") && parts2->at(1)->get("text")->get("content"))
+								snprintf(r.publishedText, sizeof(r.publishedText), "%s", parts2->at(1)->get("text")->get("content")->asString(""));
+						}
+					}
+
+					const JsonValue *cimg = lvm->get("contentImage");
+					const JsonValue *tvm = cimg ? cimg->get("thumbnailViewModel") : nullptr;
+					if(!tvm && cimg && cimg->get("collectionThumbnailViewModel"))
+						tvm = cimg->get("collectionThumbnailViewModel")->get("primaryThumbnail") ? cimg->get("collectionThumbnailViewModel")->get("primaryThumbnail")->get("thumbnailViewModel") : nullptr;
+					if(tvm && tvm->get("image") && tvm->get("image")->get("sources"))
+					{
+						const JsonValue *srcs = tvm->get("image")->get("sources");
+						if(srcs->size() > 0 && srcs->at(0)->get("url"))
+							snprintf(r.avatarUrl, sizeof(r.avatarUrl), "%s", srcs->at(0)->get("url")->asString(""));
+					}
+					if(tvm && tvm->get("overlays") && tvm->get("overlays")->type == JsonType::Array)
+					{
+						for(const auto &ov : tvm->get("overlays")->arr)
+						{
+							const JsonValue *tobvm = ov.get("thumbnailOverlayBadgeViewModel");
+							const JsonValue *tbadges = tobvm ? tobvm->get("thumbnailBadges") : nullptr;
+							if(tbadges && tbadges->size() > 0)
+							{
+								const JsonValue *tbvm = tbadges->at(0)->get("thumbnailBadgeViewModel");
+								if(tbvm && tbvm->get("text"))
+								{
+									snprintf(r.lengthText, sizeof(r.lengthText), "%s", tbvm->get("text")->asString(""));
+									break;
+								}
+							}
+						}
+					}
+
+					count++;
+					if(count >= maxResults) return;
+				}
+			}
+		}
+
+		for(const auto &kv : node.obj)
+			extractVideosFromNode(kv.second, results, count, maxResults);
+	}
+	else if(node.type == JsonType::Array)
+	{
+		for(const auto &v : node.arr)
+			extractVideosFromNode(v, results, count, maxResults);
+	}
+}
+
+int ytBrowseCategory(const char *browseId, YtResult *results, int maxResults, char *err, int errSize)
+{
+	if(!browseId || browseId[0] == '\0')
+	{
+		snprintf(err, errSize, "Invalid category ID");
+		return 0;
+	}
+
+	std::string body = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20260925.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"browseId\":\"";
+	body += jsonEscape(browseId);
+	body += "\"}";
+
+	std::string response;
+	if(!httpPost("https://www.youtube.com/youtubei/v1/browse", body.c_str(), response))
+	{
+		snprintf(err, errSize, "Could not reach YouTube");
+		return 0;
+	}
+
+	JsonValue root;
+	if(!jsonParse(response.c_str(), response.size(), root))
+	{
+		snprintf(err, errSize, "Unexpected response from YouTube");
+		return 0;
+	}
+
+	int count = 0;
+	extractVideosFromNode(root, results, count, maxResults);
+
+	if(count == 0)
+		snprintf(err, errSize, "No videos found in this category");
+
+	return count;
+}
+
+static void extractPlaylistItems(const JsonValue &node, YtPlaylistItem *items, int &count, int maxItems)
+{
+	if(count >= maxItems) return;
+
+	if(node.type == JsonType::Object)
+	{
+		const JsonValue *pvr = node.get("playlistVideoRenderer");
+		if(pvr && pvr->get("videoId"))
+		{
+			const char *vid = pvr->get("videoId")->asString("");
+			if(vid[0] != '\0')
+			{
+				YtPlaylistItem &itm = items[count];
+				memset(&itm, 0, sizeof(itm));
+				snprintf(itm.videoId, sizeof(itm.videoId), "%s", vid);
+				snprintf(itm.title, sizeof(itm.title), "%s", firstRunText(pvr->get("title"), "(untitled)"));
+				const char *author = firstRunText(pvr->get("shortBylineText"), "");
+				snprintf(itm.author, sizeof(itm.author), "%s", author ? author : "");
+				snprintf(itm.duration, sizeof(itm.duration), "%s", firstRunText(pvr->get("lengthText"), ""));
+				const JsonValue *th = pvr->get("thumbnail") ? pvr->get("thumbnail")->get("thumbnails") : nullptr;
+				if(th && th->size() > 0 && th->at(0)->get("url"))
+					snprintf(itm.thumbUrl, sizeof(itm.thumbUrl), "%s", th->at(0)->get("url")->asString(""));
+				count++;
+				if(count >= maxItems) return;
+			}
+		}
+
+		const JsonValue *lvm = node.get("lockupViewModel");
+		if(lvm)
+		{
+			const char *cid = lvm->get("contentId") ? lvm->get("contentId")->asString("") : "";
+			if(cid[0] != '\0' && strlen(cid) == 11)
+			{
+				const JsonValue *meta = lvm->get("metadata");
+				const JsonValue *lmvm = meta ? meta->get("lockupMetadataViewModel") : nullptr;
+				const JsonValue *tVal = lmvm && lmvm->get("title") ? lmvm->get("title")->get("content") : nullptr;
+				const char *title = tVal ? tVal->asString("") : "";
+				if(title[0] != '\0')
+				{
+					YtPlaylistItem &itm = items[count];
+					memset(&itm, 0, sizeof(itm));
+					snprintf(itm.videoId, sizeof(itm.videoId), "%s", cid);
+					snprintf(itm.title, sizeof(itm.title), "%s", title);
+
+					const JsonValue *cmvm = lmvm ? (lmvm->get("metadata") ? lmvm->get("metadata")->get("contentMetadataViewModel") : nullptr) : nullptr;
+					const JsonValue *rows = cmvm ? cmvm->get("metadataRows") : (lmvm ? lmvm->get("metadataRows") : nullptr);
+					if(rows && rows->size() > 0)
+					{
+						const JsonValue *parts = rows->at(0)->get("metadataParts");
+						if(parts && parts->size() > 0 && parts->at(0)->get("text") && parts->at(0)->get("text")->get("content"))
+							snprintf(itm.author, sizeof(itm.author), "%s", parts->at(0)->get("text")->get("content")->asString(""));
+					}
+
+					const JsonValue *ci = lvm->get("contentImage") ? lvm->get("contentImage")->get("thumbnailViewModel") : nullptr;
+					if(ci)
+					{
+						const JsonValue *srcs = ci->get("image") ? ci->get("image")->get("sources") : nullptr;
+						if(srcs && srcs->size() > 0 && srcs->at(0)->get("url"))
+							snprintf(itm.thumbUrl, sizeof(itm.thumbUrl), "%s", srcs->at(0)->get("url")->asString(""));
+
+						const JsonValue *overlays = ci->get("overlays");
+						if(overlays && overlays->size() > 0)
+						{
+							const JsonValue *bovm = overlays->at(0)->get("thumbnailBottomOverlayViewModel");
+							const JsonValue *badges = bovm ? bovm->get("badges") : nullptr;
+							if(badges && badges->size() > 0)
+							{
+								const JsonValue *tbvm = badges->at(0)->get("thumbnailBadgeViewModel");
+								if(tbvm && tbvm->get("text"))
+									snprintf(itm.duration, sizeof(itm.duration), "%s", tbvm->get("text")->asString(""));
+							}
+						}
+					}
+					count++;
+					if(count >= maxItems) return;
+				}
+			}
+		}
+
+		for(const auto &kv : node.obj)
+			extractPlaylistItems(kv.second, items, count, maxItems);
+	}
+	else if(node.type == JsonType::Array)
+	{
+		for(const auto &v : node.arr)
+			extractPlaylistItems(v, items, count, maxItems);
+	}
+}
+
+bool ytPlaylistBrowse(const char *playlistId, char *titleOut, int titleOutSize, char *authorOut, int authorOutSize, YtPlaylistItem *items, int maxItems, int *outCount, char *err, int errSize)
+{
+	if(!playlistId || playlistId[0] == '\0')
+	{
+		snprintf(err, errSize, "Invalid playlist ID");
+		return false;
+	}
+
+	std::string browseId = playlistId;
+	if(strncmp(playlistId, "VL", 2) != 0)
+		browseId = std::string("VL") + playlistId;
+
+	std::string body = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20260925.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"browseId\":\"";
+	body += jsonEscape(browseId.c_str());
+	body += "\"}";
+
+	std::string response;
+	if(!httpPost("https://www.youtube.com/youtubei/v1/browse", body.c_str(), response))
+	{
+		snprintf(err, errSize, "Could not reach YouTube");
+		return false;
+	}
+
+	JsonValue root;
+	if(!jsonParse(response.c_str(), response.size(), root))
+	{
+		snprintf(err, errSize, "Unexpected response from YouTube");
+		return false;
+	}
+
+	if(titleOut && titleOutSize > 0) titleOut[0] = '\0';
+	if(authorOut && authorOutSize > 0) authorOut[0] = '\0';
+
+	const JsonValue *hdr = root.get("header");
+	const JsonValue *plh = hdr ? hdr->get("playlistHeaderRenderer") : nullptr;
+	if(plh)
+	{
+		if(titleOut && titleOutSize > 0)
+			snprintf(titleOut, titleOutSize, "%s", firstRunText(plh->get("title"), "(playlist)"));
+		if(authorOut && authorOutSize > 0)
+			snprintf(authorOut, authorOutSize, "%s", firstRunText(plh->get("ownerText"), ""));
+	}
+
+	int count = 0;
+	extractPlaylistItems(root, items, count, maxItems);
+	if(outCount) *outCount = count;
+	return count > 0;
 }

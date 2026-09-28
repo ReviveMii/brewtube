@@ -56,6 +56,7 @@ struct NetStream
 	int64_t restartOffset = 0;
 	long httpStatus = 0;
 	char errorText[128] = "";
+	int stallRetries = 0;
 };
 
 namespace {
@@ -148,6 +149,7 @@ size_t writeCb(char *ptr, size_t size, size_t nmemb, void *userdata)
 		memcpy(s->cache + pos, ptr + done, chunk);
 		s->wrPos += chunk;
 		done += chunk;
+		s->stallRetries = 0;
 		s->dataCond.signal();
 	}
 	bool abort = s->quit || s->restart;
@@ -201,6 +203,18 @@ void *threadEntry(void *arg)
 		curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &finalCode);
 		if(finalCode > 0)
 			s->httpStatus = finalCode;
+
+		if(res == CURLE_OPERATION_TIMEDOUT && s->stallRetries < 3)
+		{
+			s->stallRetries++;
+			s->restartOffset = s->wrPos;
+			s->wrPos = s->restartOffset;
+			s->rdPos = s->restartOffset;
+			s->spaceCond.signal();
+			s->dataCond.signal();
+			s->lock.unlock();
+			continue;
+		}
 
 		if(res != CURLE_OK || (s->httpStatus != 200 && s->httpStatus != 206))
 		{
@@ -289,6 +303,8 @@ extern "C" NetStream *netOpenEx(const char *url, char *err, int errSize, int64_t
 	curl_easy_setopt(s->curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	curl_easy_setopt(s->curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 	curl_easy_setopt(s->curl, CURLOPT_CONNECTTIMEOUT, 15L);
+	curl_easy_setopt(s->curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+	curl_easy_setopt(s->curl, CURLOPT_LOW_SPEED_TIME, 1L);
 	curl_easy_setopt(s->curl, CURLOPT_NOSIGNAL, 1L);
 	curl_easy_setopt(s->curl, CURLOPT_PROTOCOLS_STR, "HTTP,HTTPS");
 	curl_easy_setopt(s->curl, CURLOPT_XFERINFOFUNCTION, progressCb);

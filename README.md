@@ -32,22 +32,22 @@ Run ```make```
 - Make VISIONOS client faster to replace ANDROID
 - ~~Channels (channel name clickable in player and channels in search results)~~
 - ~~Display video metadata and channel profile picture in player~~
-- Playlists (in search results)
+- ~~Playlists (in search results)~~
 - Sign-In (with What to Watch, Subscriptions, Watch Later, Watch History, Favorites, Uploads and Playlists)
 - Comments
 - Pair Device
 - ~~Like/Dislike metadata~~
 - ~~Show video description~~
 - ~~Video suggestions~~
-- Local Playlists
-- Categories
+- ~~Local Playlists~~
+- ~~Categories~~
 - ~~Captions~~
-- Search Suggestions
+- ~~Search Suggestions~~
 - Local Search History
 - Local Watch History
 - ~~Fix buttons~~
 - ~~Display upload date in search results~~
-- Local Subscriptions
+- ~~Local Subscriptions~~
 
 ## Credits
 - [ffmpeg](https://ffmpeg.org/) - used for decoding videos

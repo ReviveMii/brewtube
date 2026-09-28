@@ -2,7 +2,7 @@
 <app version="1">
 	<name>BrewTube</name>
 	<coder>ReviveMii</coder>
-	<version>0.3</version>
+	<version>0.4</version>
 	<release_date>20260925000000</release_date>
 	<short_description>Homebrew YouTube App for the Wii</short_description>
 	<long_description>WARNING: THIS IS STILL IN EARLY DEVELOPMENT. A Work-In-Progress Wii Homebrew YouTube App based on WiiMC. Report bugs in https://revivemii.xyz/discord. Source Code: https://github.com/ReviveMii/brewtube</long_description>

@@ -41,7 +41,7 @@ namespace {
 
 const int AUDIO_VOICE = 0;
 const uint32_t AUDIO_CHUNK = 2048;
-const int AUDIO_BUFFERS = 3;
+const int AUDIO_BUFFERS = 8;
 const uint32_t RING_FRAMES = 65536;
 const int MAX_SLOTS = 16;
 const int SLOT_BUDGET = 6 * 1024 * 1024;
@@ -111,9 +111,9 @@ class Player
 {
 	public:
 		Player(Decoder * d, const MediaInfo & i, const char * p, const char * customTitle = nullptr, const YtResult * meta = nullptr) :
-			dec(d), info(i), path(p), titleOverride(customTitle), ytMeta(meta) {}
+			dec(d), info(i), path(p), titleOverride(customTitle), ytMeta(meta) { volume = ytGetVolume(); }
 		Player(const char * p, const char * customTitle = nullptr, const YtResult * meta = nullptr) :
-			dec(nullptr), path(p), titleOverride(customTitle), ytMeta(meta) { memset(&info, 0, sizeof(info)); }
+			dec(nullptr), path(p), titleOverride(customTitle), ytMeta(meta) { memset(&info, 0, sizeof(info)); volume = ytGetVolume(); }
 		~Player();
 		PlayResult run(char * err, int errSize);
 		void feedAudio(int voice);
@@ -144,6 +144,8 @@ class Player
 		int slotCount = 0;
 		int shown = -1;
 		double shownPts = 0;
+		double wdLastPts = -1;
+		uint64_t wdLastChange = 0;
 
 		int16_t * ring = nullptr;
 		int16_t * chunk[AUDIO_BUFFERS] = { nullptr };
@@ -152,11 +154,11 @@ class Player
 		uint32_t ringBaseRd = 0;
 		volatile uint32_t ringRd = 0;
 		volatile uint32_t ringWr = 0;
-		volatile int pendingFill = 0;
+		volatile uint32_t chunkRd = 0;
+		volatile uint32_t chunkWr = 0;
 		volatile uint64_t lastCallback = 0;
 		bool ringFresh = true;
 		double ringBasePts = 0;
-		int nextChunk = 0;
 		bool audioRunning = false;
 		int volume = 200;
 
@@ -172,7 +174,7 @@ class Player
 		void decodeLoop();
 		void pushVideo(const DecFrame & f);
 		void pushAudio(const DecFrame & f);
-		void fillChunk(int index);
+		bool fillChunk();
 		void startAudio();
 		void tryStart();
 		void consumeVideo(double t);
@@ -480,45 +482,64 @@ void Player::pushAudio(const DecFrame & f)
 	lock.unlock();
 }
 
-void Player::fillChunk(int index)
+bool Player::fillChunk()
 {
-	int16_t * buf = chunk[index];
+	if(chunkWr - chunkRd >= AUDIO_BUFFERS)
+		return false;
+
 	lock.lock();
 	uint32_t avail = ringWr - ringRd;
+	if(avail == 0 && !eof)
+	{
+		lock.unlock();
+		return false;
+	}
 	uint32_t n = avail < AUDIO_CHUNK ? avail : AUDIO_CHUNK;
 	uint32_t pos = ringRd & (RING_FRAMES - 1);
 	uint32_t first = RING_FRAMES - pos < n ? RING_FRAMES - pos : n;
+
+	int idx = chunkWr % AUDIO_BUFFERS;
+	int16_t * buf = chunk[idx];
 
 	memcpy(buf, ring + pos * 2, first * 4);
 	memcpy(buf + first * 2, ring, (n - first) * 4);
 	memset(buf + n * 2, 0, (AUDIO_CHUNK - n) * 4);
 	BARRIER();
-	chunkPts[index] = ringBasePts + (double)(ringRd - ringBaseRd) / info.sampleRate;
+	chunkPts[idx] = ringBasePts + (double)(ringRd - ringBaseRd) / info.sampleRate;
 	ringRd = ringRd + n;
 	lock.unlock();
+
 	DCFlushRange(buf, AUDIO_CHUNK * 4);
+	BARRIER();
+	chunkWr++;
+	return true;
 }
 
 void Player::feedAudio(int voice)
 {
-	playingChunk = (playingChunk + 1) % AUDIO_BUFFERS;
+	if(chunkRd != chunkWr)
+	{
+		playingChunk = chunkRd % AUDIO_BUFFERS;
+		ASND_AddVoice(voice, chunk[playingChunk], AUDIO_CHUNK * 4);
+		chunkRd++;
+	}
 	lastCallback = gettime();
-	ASND_AddVoice(voice, chunk[nextChunk], AUDIO_CHUNK * 4);
-	nextChunk = (nextChunk + 1) % AUDIO_BUFFERS;
-	pendingFill++;
 }
 
 void Player::startAudio()
 {
-	fillChunk(0);
-	fillChunk(1);
-	fillChunk(2);
+	chunkRd = 0;
+	chunkWr = 0;
+	while(chunkWr < 4)
+	{
+		if(!fillChunk())
+			break;
+	}
 	playingChunk = 0;
-	nextChunk = 2;
-	pendingFill = 0;
 	lastCallback = gettime();
 	ASND_SetVoice(AUDIO_VOICE, VOICE_STEREO_16BIT, info.sampleRate, 0, chunk[0], AUDIO_CHUNK * 4, volume, volume, audioCallback);
 	ASND_AddVoice(AUDIO_VOICE, chunk[1], AUDIO_CHUNK * 4);
+	chunkRd = 2;
 	audioRunning = true;
 }
 
@@ -636,7 +657,8 @@ void Player::requestSeek(double t)
 	{
 		ASND_StopVoice(AUDIO_VOICE);
 		audioRunning = false;
-		pendingFill = 0;
+		chunkRd = 0;
+		chunkWr = 0;
 	}
 
 	lock.lock();
@@ -667,6 +689,7 @@ void Player::changeVolume(int delta)
 	volume = volume < 0 ? 0 : (volume > 255 ? 255 : volume);
 	if(audioRunning)
 		ASND_ChangeVolumeVoice(AUDIO_VOICE, volume, volume);
+	ytSetVolume(volume);
 }
 
 PlayResult Player::run(char * err, int errSize)
@@ -875,7 +898,7 @@ PlayResult Player::run(char * err, int errSize)
 	ui.append(&volUpBtn.button);
 	ui.append(&loadingTxt);
 
-	enum class Overlay { NONE, MENU, INFO, SUGGESTIONS };
+	enum class Overlay { NONE, MENU, INFO, SUGGESTIONS, ADD_PLAYLIST };
 	Overlay overlayState = Overlay::NONE;
 
 	GuiImageData btnOutline(button_png);
@@ -886,11 +909,11 @@ PlayResult Player::run(char * err, int errSize)
 
 	GuiImage overlayDim(screenWidth, screenHeight, dimCol);
 
-	int menuW = 320, menuH = 246;
+	int menuW = 320, menuH = 286;
 	GuiWindow menuWin(menuW, menuH);
 	menuWin.setPosition((screenWidth - menuW) / 2, (screenHeight - menuH) / 2);
 	menuWin.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
-	GuiImage menuBg(320, 246, (PixelColor){22, 25, 36, 250});
+	GuiImage menuBg(320, 286, (PixelColor){22, 25, 36, 250});
 	GuiImage menuBorder(320, 3, accent);
 	menuBorder.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
 	GuiText menuTitleTxt("Video Menu", 20, white);
@@ -965,6 +988,48 @@ PlayResult Player::run(char * err, int errSize)
 		volatile bool success = false;
 	} capTask;
 
+	if(captionTracks.count > 0 && ytGetCaptionsEnabled())
+	{
+		selectedCaptionTrack = 0;
+		for(int i = 0; i < captionTracks.count; i++)
+		{
+			if(strncasecmp(captionTracks.tracks[i].languageCode, "en", 2) == 0)
+			{
+				selectedCaptionTrack = i;
+				break;
+			}
+		}
+		captionsActive = true;
+		snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: %s", captionTracks.tracks[selectedCaptionTrack].name);
+		captionsOptTxt.setText(captionsOptStr);
+
+		snprintf(capTask.url, sizeof(capTask.url), "%s", captionTracks.tracks[selectedCaptionTrack].baseUrl);
+		capTask.lines.clear();
+		capTask.done = false;
+		capTask.success = false;
+		capThread.start([](void * arg) -> void * {
+			CapTask * t = static_cast<CapTask *>(arg);
+			t->success = ytFetchCaptions(t->url, t->lines);
+			t->done = true;
+			return nullptr;
+		}, &capTask, 64 * 1024, ThreadPriority::Normal);
+	}
+
+	GuiImage addPlOptImg(&btnOutline);
+	addPlOptImg.setSize(260, 36);
+	GuiImage addPlOptImgOver(&btnOutlineOver);
+	addPlOptImgOver.setSize(260, 36);
+	GuiText addPlOptTxt("Add to Playlist", 17, btnTextCol);
+	GuiButton addPlOptBtn(260, 36);
+	addPlOptBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	addPlOptBtn.setPosition(0, 180);
+	addPlOptBtn.setImage(&addPlOptImg);
+	addPlOptBtn.setImageOver(&addPlOptImgOver);
+	addPlOptBtn.setLabel(&addPlOptTxt);
+	addPlOptBtn.setSoundOver(&btnSoundOver2);
+	addPlOptBtn.setTrigger(&trigA);
+	addPlOptBtn.setEffectGrow();
+
 	GuiImage menuCloseImg(&btnOutline);
 	menuCloseImg.setSize(140, 34);
 	GuiImage menuCloseImgOver(&btnOutlineOver);
@@ -972,7 +1037,7 @@ PlayResult Player::run(char * err, int errSize)
 	GuiText menuCloseTxt("Close", 18, btnTextCol);
 	GuiButton menuCloseBtn(140, 34);
 	menuCloseBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
-	menuCloseBtn.setPosition(0, 192);
+	menuCloseBtn.setPosition(0, 232);
 	menuCloseBtn.setImage(&menuCloseImg);
 	menuCloseBtn.setImageOver(&menuCloseImgOver);
 	menuCloseBtn.setLabel(&menuCloseTxt);
@@ -986,7 +1051,71 @@ PlayResult Player::run(char * err, int errSize)
 	menuWin.append(&infoOptBtn);
 	menuWin.append(&suggOptBtn);
 	menuWin.append(&captionsOptBtn);
+	menuWin.append(&addPlOptBtn);
 	menuWin.append(&menuCloseBtn);
+
+	int addPlW = 380, addPlH = 290;
+	GuiWindow addPlWin(addPlW, addPlH);
+	addPlWin.setPosition((screenWidth - addPlW) / 2, (screenHeight - addPlH) / 2);
+	addPlWin.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiImage addPlBg(380, 290, (PixelColor){22, 25, 36, 250});
+	GuiImage addPlBorder(380, 3, accent);
+	addPlBorder.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	GuiText addPlTitleTxt("Add to Playlist", 20, white);
+	addPlTitleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	addPlTitleTxt.setPosition(0, 14);
+
+	GuiImage addPlNewImg(&btnOutline);
+	addPlNewImg.setSize(300, 36);
+	GuiImage addPlNewImgOver(&btnOutlineOver);
+	addPlNewImgOver.setSize(300, 36);
+	GuiText addPlNewTxt("+ New Playlist", 17, btnTextCol);
+	GuiButton addPlNewBtn(300, 36);
+	addPlNewBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	addPlNewBtn.setPosition(0, 48);
+	addPlNewBtn.setImage(&addPlNewImg);
+	addPlNewBtn.setImageOver(&addPlNewImgOver);
+	addPlNewBtn.setLabel(&addPlNewTxt);
+	addPlNewBtn.setSoundOver(&btnSoundOver2);
+	addPlNewBtn.setTrigger(&trigA);
+	addPlNewBtn.setEffectGrow();
+
+	const int MAX_ADD_PL = 3;
+	GuiButton * addPlItemBtn[MAX_ADD_PL] = { nullptr };
+	GuiImage * addPlItemImg[MAX_ADD_PL] = { nullptr };
+	GuiImage * addPlItemImgOver[MAX_ADD_PL] = { nullptr };
+	GuiText * addPlItemTxt[MAX_ADD_PL] = { nullptr };
+	char addPlItemLabel[MAX_ADD_PL][64];
+
+	char addPlStatusStr[96] = "";
+	GuiText addPlStatusTxt(addPlStatusStr, 15, (PixelColor){170, 225, 175, 255});
+	addPlStatusTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	addPlStatusTxt.setPosition(0, 212);
+
+	GuiImage addPlCloseImg(&btnOutline);
+	addPlCloseImg.setSize(140, 34);
+	GuiImage addPlCloseImgOver(&btnOutlineOver);
+	addPlCloseImgOver.setSize(140, 34);
+	GuiText addPlCloseTxt("Close", 18, btnTextCol);
+	GuiButton addPlCloseBtn(140, 34);
+	addPlCloseBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	addPlCloseBtn.setPosition(0, 242);
+	addPlCloseBtn.setImage(&addPlCloseImg);
+	addPlCloseBtn.setImageOver(&addPlCloseImgOver);
+	addPlCloseBtn.setLabel(&addPlCloseTxt);
+	addPlCloseBtn.setSoundOver(&btnSoundOver2);
+	addPlCloseBtn.setTrigger(&trigA);
+	addPlCloseBtn.setEffectGrow();
+
+	addPlWin.append(&addPlBg);
+	addPlWin.append(&addPlBorder);
+	addPlWin.append(&addPlTitleTxt);
+	addPlWin.append(&addPlNewBtn);
+	addPlWin.append(&addPlStatusTxt);
+	addPlWin.append(&addPlCloseBtn);
+
+	std::vector<YtLocalPlaylist> cachedAddPlaylists;
+	bool addPlBuilt = false;
 
 	char lastCapLine[256] = "";
 	struct CaptionDisplay
@@ -1468,6 +1597,7 @@ PlayResult Player::run(char * err, int errSize)
 						if(selectedCaptionTrack < 0)
 						{
 							captionsActive = false;
+							ytSetCaptionsEnabled(false);
 							activeCaptions.clear();
 							snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: Off");
 							captionsOptTxt.setText(captionsOptStr);
@@ -1475,6 +1605,7 @@ PlayResult Player::run(char * err, int errSize)
 						else
 						{
 							captionsActive = true;
+							ytSetCaptionsEnabled(true);
 							snprintf(captionsOptStr, sizeof(captionsOptStr), "Captions: %s", captionTracks.tracks[selectedCaptionTrack].name);
 							captionsOptTxt.setText(captionsOptStr);
 
@@ -1499,6 +1630,14 @@ PlayResult Player::run(char * err, int errSize)
 							}
 						}
 					}
+				}
+				else if(addPlOptBtn.getState() == STATE::CLICKED)
+				{
+					addPlOptBtn.resetState();
+					overlayState = Overlay::ADD_PLAYLIST;
+					addPlStatusStr[0] = '\0';
+					addPlStatusTxt.setText("");
+					addPlBuilt = false;
 				}
 				else if(menuCloseBtn.getState() == STATE::CLICKED)
 				{
@@ -1638,6 +1777,102 @@ PlayResult Player::run(char * err, int errSize)
 					overlayState = Overlay::NONE;
 				}
 			}
+			else if(overlayState == Overlay::ADD_PLAYLIST)
+			{
+				if(!addPlBuilt)
+				{
+					addPlBuilt = true;
+					for(int i = 0; i < MAX_ADD_PL; i++)
+					{
+						if(addPlItemBtn[i]) { addPlWin.remove(addPlItemBtn[i]); delete addPlItemBtn[i]; addPlItemBtn[i] = nullptr; }
+						if(addPlItemImg[i]) { delete addPlItemImg[i]; addPlItemImg[i] = nullptr; }
+						if(addPlItemImgOver[i]) { delete addPlItemImgOver[i]; addPlItemImgOver[i] = nullptr; }
+						if(addPlItemTxt[i]) { delete addPlItemTxt[i]; addPlItemTxt[i] = nullptr; }
+					}
+					cachedAddPlaylists = ytGetLocalPlaylists();
+					int count = (int)cachedAddPlaylists.size();
+					if(count > MAX_ADD_PL) count = MAX_ADD_PL;
+					for(int i = 0; i < count; i++)
+					{
+						addPlItemImg[i] = new GuiImage(&btnOutline);
+						addPlItemImg[i]->setSize(300, 34);
+						addPlItemImgOver[i] = new GuiImage(&btnOutlineOver);
+						addPlItemImgOver[i]->setSize(300, 34);
+
+						snprintf(addPlItemLabel[i], sizeof(addPlItemLabel[i]), "%s (%zu)", cachedAddPlaylists[i].title, cachedAddPlaylists[i].items.size());
+						addPlItemTxt[i] = new GuiText(addPlItemLabel[i], 16, btnTextCol);
+						addPlItemTxt[i]->setMaxWidth(280);
+
+						addPlItemBtn[i] = new GuiButton(300, 34);
+						addPlItemBtn[i]->setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+						addPlItemBtn[i]->setPosition(0, 92 + i * 40);
+						addPlItemBtn[i]->setImage(addPlItemImg[i]);
+						addPlItemBtn[i]->setImageOver(addPlItemImgOver[i]);
+						addPlItemBtn[i]->setLabel(addPlItemTxt[i]);
+						addPlItemBtn[i]->setSoundOver(&btnSoundOver2);
+						addPlItemBtn[i]->setTrigger(&trigA);
+						addPlItemBtn[i]->setEffectGrow();
+
+						addPlWin.append(addPlItemBtn[i]);
+					}
+				}
+
+				for(int i = 3; i >= 0; i--) addPlWin.update(controller[i]);
+
+				if(addPlNewBtn.getState() == STATE::CLICKED)
+				{
+					addPlNewBtn.resetState();
+					char plTitle[64];
+					if(cachedAddPlaylists.empty())
+						snprintf(plTitle, sizeof(plTitle), "Favorites");
+					else
+						snprintf(plTitle, sizeof(plTitle), "Playlist %zu", cachedAddPlaylists.size() + 1);
+
+					char newId[64] = "";
+					if(ytCreateLocalPlaylist(plTitle, newId, sizeof(newId)))
+					{
+						YtLocalPlaylistItem itm;
+						memset(&itm, 0, sizeof(itm));
+						snprintf(itm.videoId, sizeof(itm.videoId), "%s", ytMeta ? ytMeta->videoId : "");
+						snprintf(itm.title, sizeof(itm.title), "%s", ytMeta ? ytMeta->title : "");
+						snprintf(itm.author, sizeof(itm.author), "%s", ytMeta ? ytMeta->author : "");
+						snprintf(itm.duration, sizeof(itm.duration), "%s", ytMeta ? ytMeta->lengthText : "");
+						snprintf(itm.thumbUrl, sizeof(itm.thumbUrl), "%s", ytMeta ? ytMeta->avatarUrl : "");
+						ytAddToLocalPlaylist(newId, itm);
+
+						snprintf(addPlStatusStr, sizeof(addPlStatusStr), "Saved to %s!", plTitle);
+						addPlStatusTxt.setText(addPlStatusStr);
+						addPlBuilt = false;
+					}
+				}
+
+				for(int i = 0; i < (int)cachedAddPlaylists.size() && i < MAX_ADD_PL; i++)
+				{
+					if(addPlItemBtn[i] && addPlItemBtn[i]->getState() == STATE::CLICKED)
+					{
+						addPlItemBtn[i]->resetState();
+						YtLocalPlaylistItem itm;
+						memset(&itm, 0, sizeof(itm));
+						snprintf(itm.videoId, sizeof(itm.videoId), "%s", ytMeta ? ytMeta->videoId : "");
+						snprintf(itm.title, sizeof(itm.title), "%s", ytMeta ? ytMeta->title : "");
+						snprintf(itm.author, sizeof(itm.author), "%s", ytMeta ? ytMeta->author : "");
+						snprintf(itm.duration, sizeof(itm.duration), "%s", ytMeta ? ytMeta->lengthText : "");
+						snprintf(itm.thumbUrl, sizeof(itm.thumbUrl), "%s", ytMeta ? ytMeta->avatarUrl : "");
+						ytAddToLocalPlaylist(cachedAddPlaylists[i].id, itm);
+
+						snprintf(addPlStatusStr, sizeof(addPlStatusStr), "Saved to %s!", cachedAddPlaylists[i].title);
+						addPlStatusTxt.setText(addPlStatusStr);
+						addPlBuilt = false;
+						break;
+					}
+				}
+
+				if(addPlCloseBtn.getState() == STATE::CLICKED)
+				{
+					addPlCloseBtn.resetState();
+					overlayState = Overlay::NONE;
+				}
+			}
 
 			if(seekBtn.getState() == STATE::CLICKED && scrubChan < 0 && overlayState == Overlay::NONE)
 			{
@@ -1686,12 +1921,32 @@ PlayResult Player::run(char * err, int errSize)
 		if(started && !paused && info.hasVideo)
 			consumeVideo(clock());
 
+		if(started && !paused && info.hasVideo && !finished())
+		{
+			uint64_t now = gettime();
+			if(shownPts != wdLastPts)
+			{
+				wdLastPts = shownPts;
+				wdLastChange = now;
+			}
+			else if(wdLastChange != 0 && ticks_to_millisecs(now - wdLastChange) > 300)
+			{
+				double skipTo = clock() + 0.1;
+				double limit = info.duration > 1 ? info.duration - 1 : 0;
+				if(limit <= 0 || skipTo < limit)
+					requestSeek(skipTo);
+				wdLastChange = now;
+			}
+		}
+		else
+			wdLastChange = 0;
+
 		if(audioRunning)
 		{
-			while(pendingFill > 0)
+			while((chunkWr - chunkRd) < (AUDIO_BUFFERS - 2))
 			{
-				fillChunk(nextChunk);
-				pendingFill--;
+				if(!fillChunk())
+					break;
 			}
 		}
 
@@ -1918,6 +2173,7 @@ PlayResult Player::run(char * err, int errSize)
 				if(overlayState == Overlay::MENU) menuWin.draw();
 				else if(overlayState == Overlay::INFO) infoWin.draw();
 				else if(overlayState == Overlay::SUGGESTIONS) suggWin.draw();
+				else if(overlayState == Overlay::ADD_PLAYLIST) addPlWin.draw();
 			}
 
 			DrawPointers();
@@ -1932,7 +2188,8 @@ exitPlayLoop:
 	{
 		ASND_StopVoice(AUDIO_VOICE);
 		audioRunning = false;
-		pendingFill = 0;
+		chunkRd = 0;
+		chunkWr = 0;
 	}
 
 	if(opening)
@@ -1960,6 +2217,15 @@ exitPlayLoop:
 
 	if(capThread.isRunning())
 		capThread.join();
+
+	addPlWin.removeAll();
+	for(int i = 0; i < MAX_ADD_PL; i++)
+	{
+		delete addPlItemBtn[i];
+		delete addPlItemImg[i];
+		delete addPlItemImgOver[i];
+		delete addPlItemTxt[i];
+	}
 
 	suggWin.removeAll();
 	menuWin.removeAll();

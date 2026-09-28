@@ -52,5 +52,11 @@
 #include "icon_vol_down_png.h"
 #include "icon_vol_up_png.h"
 #include "icon_menu_png.h"
+#include "icon_subs_png.h"
+#include "icon_hype_png.h"
+#include "icon_music_png.h"
+#include "icon_gaming_png.h"
+#include "icon_news_png.h"
+#include "icon_sports_png.h"
 
 #endif
